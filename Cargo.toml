@@ -1,7 +1,13 @@
 [package]
 name = "swansong"
 version = "0.1.0"
+authors = ["Jacob Rothstein <hi@jbr.me>"]
 edition = "2021"
+description = "Graceful Shutdown"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/jbr/swansong"
+
 
 [dependencies]
 event-listener = "5.2.0"
