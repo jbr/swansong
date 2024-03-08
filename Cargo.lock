@@ -291,9 +291,9 @@ dependencies = [
 
 [[package]]
 name = "stopper"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48fa36dc5fe32d258aa7a4979a45f1776608762a8d9f65ac9d82b03840d542ed"
+checksum = "eb29dcd6766b0303882c945c8efc9229a1826b0307ced080d8382e5e1acc9de1"
 dependencies = [
  "event-listener 5.2.0",
  "futures-lite",
