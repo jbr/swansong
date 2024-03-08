@@ -1,0 +1,17 @@
+[package]
+name = "swansong"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+event-listener = "5.2.0"
+futures-lite = "2.2.0"
+log = "0.4.21"
+pin-project-lite = "0.2.13"
+stopper = "0.2.4"
+
+[dev-dependencies]
+async-executor = "1.8.0"
+env_logger = "0.11.3"
+fastrand = "2.0.1"
+test-harness = "0.2.0"
