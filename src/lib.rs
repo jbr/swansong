@@ -12,23 +12,27 @@
 //!
 //! The primary entrypoint is [`Swansong`]
 
-mod guard;
-
 use futures_lite::Stream;
-use guard::Manager;
-use std::future::{Future, IntoFuture};
-use stopper::Stopper;
+use std::{
+    future::{Future, IntoFuture},
+    sync::Arc,
+};
+
+mod implementation;
+use implementation::Inner;
+pub use implementation::{Guard, Guarded, Shutdown, Stop};
 
 /// A graceful shutdown synchronization mechanism
 ///
-/// Awaiting the Swansong will complete when it is stopped AND all associated [`Guard`][types::Guard]s have been
-/// dropped.
+/// Awaiting the Swansong will complete when it is stopped AND all associated
+/// [`Guard`]s have been dropped.
 ///
 /// Swansongs are cheap to clone.
+///
+/// Dropping all clones of the [`Swansong`] will stop all associated futures.
 #[derive(Clone, Debug, Default)]
 pub struct Swansong {
-    stopper: Stopper,
-    manager: Manager,
+    inner: Arc<Inner>,
 }
 
 impl Swansong {
@@ -41,126 +45,87 @@ impl Swansong {
     /// Initiate graceful shutdown.
     ///
     /// This will gracefully stop any associated futures or streams.
-    pub fn stop(&self) {
-        log::trace!("initiating graceful shutdown");
-        self.stopper.stop();
+    ///
+    /// This returns a [`Shutdown`] type, which can be blocked on with [`Shutdown::block`] or
+    /// awaited as a Future.
+    #[allow(clippy::must_use_candidate)] // It's fine not to use the returned Shutdown.
+    pub fn stop(&self) -> Shutdown {
+        self.inner.stop();
+        Shutdown::new(&self.inner)
+    }
+
+    /// Blocks the curren thread until graceful shutdown is complete
+    ///
+    /// Do not use this in async contexts. Instead, await the [`Swansong`]
+    pub fn block(self) {
+        Shutdown::new(&self.inner).block();
     }
 
     /// Determine if this Swansong has already been stopped
     #[must_use]
     pub fn is_stopped(&self) -> bool {
-        self.stopper.is_stopped()
+        self.inner.is_stopped()
     }
 
-    /// Returns a [`Future`] which wraps the provided future
-    /// and stops it when this Swansong has been stopped.
+    /// Returns a [`Future`] which wraps the provided future and stops it when this Swansong has
+    /// been stopped.
     ///
     /// Note that the `Output` of the returned future is wrapped with an Option. If the future
     /// resolves to `None`, that indicates that it was stopped instead of polling to completion.
     ///
     /// Note that this can only be used with cancel-safe futures.
-    pub fn wrap_future<F: Future>(&self, future: F) -> types::Future<F> {
-        types::Future {
-            inner: self.stopper.stop_future(future),
-        }
+    #[must_use]
+    pub fn stop_future<F: Future>(&self, future: F) -> Stop<F> {
+        Stop::new(&self.inner, future)
     }
 
-    /// Return a new [`Stream`] which will complete when this `Swansong`
-    /// has been stopped.
+    /// Return a new [`Stream`] which will complete when this `Swansong` has been stopped.
     ///
-    /// The Stream's Item is unchanged
-    pub fn wrap_stream<S: Stream>(&self, stream: S) -> types::Stream<S> {
-        types::Stream {
-            inner: self.stopper.stop_stream(stream),
-        }
+    /// The Stream's Item is unchanged.
+    #[must_use]
+    pub fn stop_stream<S: Stream>(&self, stream: S) -> Stop<S> {
+        Stop::new(&self.inner, stream)
     }
 
-    /// Return a new shutdown guard.
-    ///
-    /// Graceful shutdown will be delayed until this and all clones of it are dropped.
-    #[must_use = "A swansong guard only prevents shutdown until it is dropped"]
-    pub fn guard(&self) -> types::Guard {
-        self.manager.guard()
+    /// Returns a new Guard, which forstalls shutdown until it is dropped.
+    #[must_use]
+    pub fn guard(&self) -> Guard {
+        Guard::new(&self.inner)
     }
 
     /// The current number of outstanding `Guard`s
     #[must_use]
     pub fn guard_count(&self) -> usize {
-        self.manager.count()
+        self.inner.guard_count_relaxed()
+    }
+
+    /// Attach a guard to the provided type, delaying shutdown until it drops.
+    ///
+    /// For Futures, this is identical to moving a `Guard` into the future, and exists as a
+    /// convenience.
+    ///
+    /// `Guarded` implements `Future`, `Stream`, `AsyncRead`, and `AsyncWrite` when the inner type
+    /// also does, and `Deref`s to the wrapped type.
+    #[must_use]
+    pub fn guarded<T>(&self, wrapped_type: T) -> Guarded<T> {
+        Guarded::new(&self.inner, wrapped_type)
+    }
+}
+
+/// If we are dropping the only [`Swansong`], stop the associated futures
+impl Drop for Swansong {
+    fn drop(&mut self) {
+        if 1 == Arc::strong_count(&self.inner) {
+            self.inner.stop();
+        }
     }
 }
 
 impl IntoFuture for Swansong {
     type Output = ();
-    type IntoFuture = types::Shutdown;
+    type IntoFuture = Shutdown;
 
     fn into_future(self) -> Self::IntoFuture {
-        types::Shutdown {
-            stopped: self.stopper.into_future(),
-            guard: self.manager.into_future(),
-        }
-    }
-}
-
-/// Types that are available publicly but probably don't need to be named
-pub mod types {
-    use crate::guard::ZeroFuture;
-    use futures_lite::{Future as Future_, Stream as Stream_};
-    use std::{
-        pin::Pin,
-        task::{ready, Context, Poll},
-    };
-    use stopper::{FutureStopper, Stopped, StreamStopper};
-
-    pub use crate::guard::Guard;
-
-    pin_project_lite::pin_project! {
-        /// A wrapper type around a stream that allows it to be stopped by a
-        /// [`Swansong`][crate::Swansong]
-        pub struct Stream<S> { #[pin] pub(crate) inner: StreamStopper<S> }
-    }
-
-    impl<S: Stream_> Stream_ for Stream<S> {
-        type Item = S::Item;
-
-        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            self.project().inner.poll_next(cx)
-        }
-
-        fn size_hint(&self) -> (usize, Option<usize>) {
-            self.inner.size_hint()
-        }
-    }
-
-    pin_project_lite::pin_project! {
-        /// A wrapper type around a [`Future`][Future_] that allows it to be stopped by a
-        /// [`Swansong`][crate::Swansong] at any await point
-        pub struct Future<F> { #[pin] pub(crate) inner: FutureStopper<F> }
-    }
-
-    impl<F: Future_> Future_ for Future<F> {
-        type Output = Option<F::Output>;
-
-        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            self.project().inner.poll(cx)
-        }
-    }
-
-    /// A [`Future`][Future_] that will be ready when the [`Swansong`][crate::Swansong] has been
-    /// stopped AND all guards are dropped.
-    #[derive(Debug)]
-    pub struct Shutdown {
-        pub(crate) stopped: Stopped,
-        pub(crate) guard: ZeroFuture,
-    }
-
-    impl Future_ for Shutdown {
-        type Output = ();
-
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            let Self { stopped, guard } = &mut *self;
-            ready!(Pin::new(stopped).poll(cx));
-            Pin::new(guard).poll(cx)
-        }
+        Shutdown::new(&self.inner)
     }
 }

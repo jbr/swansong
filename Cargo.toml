@@ -14,10 +14,11 @@ event-listener = "5.2.0"
 futures-lite = "2.3.0"
 log = "0.4.21"
 pin-project-lite = "0.2.13"
-stopper = "0.2.6"
 
 [dev-dependencies]
 async-executor = "1.8.0"
+async-global-executor = "2.4.1"
+async-io = "2.3.2"
 env_logger = "0.11.3"
 fastrand = "2.0.2"
 test-harness = "0.2.0"
