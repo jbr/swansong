@@ -14,7 +14,7 @@ event-listener = "5.2.0"
 futures-lite = "2.3.0"
 log = "0.4.21"
 pin-project-lite = "0.2.13"
-stopper = "0.2.6"
+stopper = "0.2.7"
 
 [dev-dependencies]
 async-executor = "1.8.0"
