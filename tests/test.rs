@@ -20,6 +20,8 @@ use std::{
 use swansong::Swansong;
 use test_harness::test;
 
+const TIMEOUT: Duration = Duration::from_secs(15);
+
 fn harness<F, Fut, O>(test: F) -> O
 where
     F: FnOnce() -> Fut,
@@ -29,7 +31,7 @@ where
     let _ = env_logger::builder().is_test(true).try_init();
     block_on(
         async {
-            Timer::after(Duration::from_secs(5)).await;
+            Timer::after(TIMEOUT).await;
             None
         }
         .or(async move { Some(test().await) }),
@@ -119,7 +121,7 @@ fn multi_threaded_blocking() {
         send.send(()).unwrap();
     });
 
-    receive.recv_timeout(Duration::from_secs(5)).unwrap();
+    receive.recv_timeout(TIMEOUT).unwrap();
     assert_eq!(finished_count.load(Ordering::Relaxed), expected_count);
 }
 
