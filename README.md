@@ -5,6 +5,7 @@
 * [Contributing][contributing]
 * [CI ![CI][ci-badge]][ci]
 * [API docs for main][main-docs]
+* * [![codecov](https://codecov.io/gh/jbr/swansong/graph/badge.svg?token=AXD0FXYIR4)](https://codecov.io/gh/jbr/swansong)
 
 [ci]: https://github.com/jbr/swansong/actions?query=workflow%3ACI
 [ci-badge]: https://github.com/jbr/swansong/workflows/CI/badge.svg
