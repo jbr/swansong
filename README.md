@@ -1,4 +1,4 @@
-# Swansong &mdash; A graceful shutdown
+# 🦢 Swansong &mdash; A graceful shutdown
 
 * [API Docs][docs] [![docs.rs docs][docs-badge]][docs]
 * [Releases][releases] [![crates.io version][version-badge]][crate]
