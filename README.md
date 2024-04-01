@@ -1,11 +1,11 @@
-# swansong -- graceful shutdown manager
+# swansong &mdash; a graceful shutdown
 
 * [API Docs][docs] [![docs.rs docs][docs-badge]][docs]
 * [Releases][releases] [![crates.io version][version-badge]][crate]
 * [Contributing][contributing]
 * [CI ![CI][ci-badge]][ci]
 * [API docs for main][main-docs]
-* * [![codecov](https://codecov.io/gh/jbr/swansong/graph/badge.svg?token=AXD0FXYIR4)](https://codecov.io/gh/jbr/swansong)
+* [![codecov](https://codecov.io/gh/jbr/swansong/graph/badge.svg?token=AXD0FXYIR4)](https://codecov.io/gh/jbr/swansong)
 
 [ci]: https://github.com/jbr/swansong/actions?query=workflow%3ACI
 [ci-badge]: https://github.com/jbr/swansong/workflows/CI/badge.svg
