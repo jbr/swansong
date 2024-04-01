@@ -13,7 +13,7 @@ repository = "https://github.com/jbr/swansong"
 event-listener = "5.2.0"
 futures-lite = "2.3.0"
 log = "0.4.21"
-pin-project-lite = "0.2.13"
+pin-project-lite = "0.2.14"
 
 [dev-dependencies]
 async-executor = "1.8.0"
