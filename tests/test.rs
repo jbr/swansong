@@ -1,9 +1,6 @@
 use async_global_executor::spawn;
 use async_io::{block_on, Timer};
-use futures_lite::{
-    io::{BufReader, Cursor},
-    AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, FutureExt, Stream, StreamExt,
-};
+use futures_lite::{FutureExt, Stream, StreamExt};
 use std::{
     future::{self, Future, IntoFuture},
     ops::Add,
@@ -301,6 +298,16 @@ async fn guarded_test_coverage() {
     let stream = swansong.guarded(futures_lite::stream::repeat(10)).take(5);
     assert_eq!(swansong.guard_count(), 1);
     assert_eq!(stream.fold(0, Add::add).await, 50);
+}
+
+#[cfg(feature = "futures-io")]
+#[test(harness)]
+async fn futures_io() {
+    use futures_lite::{
+        io::{BufReader, Cursor},
+        AsyncBufReadExt, AsyncReadExt, AsyncWriteExt,
+    };
+    let swansong = Swansong::new();
 
     let mut async_read = swansong.guarded(Cursor::new("hello"));
     let mut string = String::new();
