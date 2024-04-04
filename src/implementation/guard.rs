@@ -2,7 +2,7 @@ use super::Inner;
 use std::sync::{Arc, Weak};
 /// The presence of a Guard delays shutdown.
 ///
-/// Dropping all Guards allows the [`Shutdown`][crate::Shutdown] future returned by awaiting the
+/// Dropping all Guards allows the [`ShutdownCompletion`][crate::ShutdownCompletion] future returned by awaiting the
 /// [`Swansong`][crate::Swansong] to complete.
 ///
 /// Each clone is treated distinctly in the guard count.

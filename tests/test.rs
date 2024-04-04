@@ -1,9 +1,6 @@
 use async_global_executor::spawn;
 use async_io::{block_on, Timer};
-use futures_lite::{
-    io::{BufReader, Cursor},
-    AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, FutureExt, Stream, StreamExt,
-};
+use futures_lite::{FutureExt, Stream, StreamExt};
 use std::{
     future::{self, Future, IntoFuture},
     ops::Add,
@@ -50,13 +47,17 @@ async fn swansong() {
     let guard = swansong.guard();
     let guard2 = guard.clone();
     assert_eq!(swansong.guard_count(), 2);
+    assert!(swansong.state().is_running());
     assert!(poll_manually(future.as_mut()).await.is_pending());
-    swansong.stop();
+    swansong.shut_down();
+    assert!(swansong.state().is_shutting_down());
     assert!(poll_manually(future.as_mut()).await.is_pending());
     drop(guard);
+    assert!(swansong.state().is_shutting_down());
     assert!(poll_manually(future.as_mut()).await.is_pending());
     drop(guard2);
     assert!(poll_manually(future.as_mut()).await.is_ready());
+    assert!(swansong.state().is_complete());
 }
 
 #[test(harness)]
@@ -79,7 +80,7 @@ async fn multi_threaded() {
         let swansong = swansong.clone();
         move || {
             sleep(Duration::from_millis(fastrand::u64(..500)));
-            swansong.stop();
+            swansong.shut_down();
         }
     });
 
@@ -109,13 +110,13 @@ fn multi_threaded_blocking() {
         let swansong = swansong.clone();
         move || {
             sleep(Duration::from_millis(fastrand::u64(..500)));
-            swansong.stop();
+            swansong.shut_down();
         }
     });
 
     let (send, receive) = std::sync::mpsc::channel();
     thread::spawn(move || {
-        swansong.block();
+        swansong.block_on_shutdown_completion();
         send.send(()).unwrap();
     });
 
@@ -143,16 +144,16 @@ async fn future() {
     }
 
     let swansong = Swansong::new();
-    let mut future = swansong.stop_future(Fut(false));
+    let mut future = swansong.interrupt(Fut(false));
     assert!(poll_manually(Pin::new(&mut future)).await.is_pending());
-    swansong.stop();
+    swansong.shut_down();
     assert_eq!(
         poll_manually(Pin::new(&mut future)).await,
         Poll::Ready(None)
     );
 
     let swansong = Swansong::new();
-    let mut future = swansong.stop_future(Fut(false));
+    let mut future = swansong.interrupt(Fut(false));
     assert!(poll_manually(Pin::new(&mut future)).await.is_pending());
     future.ready();
     assert_eq!(
@@ -181,19 +182,19 @@ async fn stream() {
     }
 
     let swansong = Swansong::new();
-    let mut stream = swansong.stop_stream(Stream_(false));
+    let mut stream = swansong.interrupt(Stream_(false));
     assert_eq!(stream.next().await, Some(()));
     assert_eq!(stream.next().await, Some(()));
-    swansong.stop();
+    swansong.shut_down();
     assert_eq!(stream.next().await, None);
 
     let swansong = Swansong::new();
-    let mut stream = swansong.stop_stream(Stream_(false));
+    let mut stream = swansong.interrupt(Stream_(false));
     assert_eq!(stream.next().await, Some(()));
     assert_eq!(stream.next().await, Some(()));
     stream.ready();
     assert_eq!(stream.next().await, None);
-    swansong.stop();
+    swansong.shut_down();
     assert_eq!(stream.next().await, None);
 }
 
@@ -208,7 +209,7 @@ async fn multi_threaded_future_guarded() {
         let finished_count = finished_count.clone();
         let canceled_count = canceled_count.clone();
         let fut = swansong
-            .stop_future(async move {
+            .interrupt(async move {
                 for _ in 0..fastrand::u8(..5) {
                     Timer::after(Duration::from_millis(fastrand::u64(..100))).await;
                 }
@@ -230,7 +231,7 @@ async fn multi_threaded_future_guarded() {
         let swansong = swansong.clone();
         async move {
             Timer::after(Duration::from_millis(fastrand::u64(..500))).await;
-            swansong.stop();
+            swansong.shut_down();
         }
     })
     .detach();
@@ -252,7 +253,7 @@ async fn multi_threaded_stream_guarded() {
     for _ in 0..expected_count {
         let finished_count = finished_count.clone();
         let mut stream = swansong
-            .stop_stream(Timer::interval(Duration::from_millis(fastrand::u64(
+            .interrupt(Timer::interval(Duration::from_millis(fastrand::u64(
                 0..100,
             ))))
             .guarded();
@@ -269,7 +270,7 @@ async fn multi_threaded_stream_guarded() {
         let swansong = swansong.clone();
         async move {
             Timer::after(Duration::from_millis(fastrand::u64(..500))).await;
-            swansong.stop();
+            swansong.shut_down();
         }
     })
     .detach();
@@ -301,6 +302,16 @@ async fn guarded_test_coverage() {
     let stream = swansong.guarded(futures_lite::stream::repeat(10)).take(5);
     assert_eq!(swansong.guard_count(), 1);
     assert_eq!(stream.fold(0, Add::add).await, 50);
+}
+
+#[cfg(feature = "futures-io")]
+#[test(harness)]
+async fn futures_io() {
+    use futures_lite::{
+        io::{BufReader, Cursor},
+        AsyncBufReadExt, AsyncReadExt, AsyncWriteExt,
+    };
+    let swansong = Swansong::new();
 
     let mut async_read = swansong.guarded(Cursor::new("hello"));
     let mut string = String::new();
@@ -322,4 +333,30 @@ async fn guarded_test_coverage() {
     let mut async_write = swansong.guarded(Vec::new());
     async_write.write_all(b"hello").await.unwrap();
     assert_eq!(async_write, b"hello");
+}
+
+#[test]
+fn iterator() {
+    let swansong = Swansong::new();
+    let mut iter = swansong
+        .interrupt(std::iter::repeat_with(|| fastrand::u8(..)))
+        .guarded();
+    assert!(iter.next().is_some());
+    assert!(iter.next().is_some());
+    swansong.shut_down();
+    assert!(iter.next().is_none());
+    assert!(iter.next().is_none());
+    drop(iter);
+    swansong.block_on_shutdown_completion();
+}
+
+#[test]
+fn iterator_drop() {
+    let swansong = Swansong::new();
+    let mut iter = swansong.interrupt(std::iter::repeat_with(|| fastrand::u8(..)));
+    assert!(iter.next().is_some());
+    assert!(iter.next().is_some());
+    drop(swansong);
+    assert!(iter.next().is_none());
+    assert!(iter.next().is_none());
 }
