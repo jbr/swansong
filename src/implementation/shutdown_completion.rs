@@ -1,7 +1,7 @@
 use super::Inner;
 use event_listener::{EventListener, Listener};
-use futures_lite::Future;
 use std::{
+    future::Future,
     pin::Pin,
     sync::Arc,
     task::{ready, Context, Poll},
@@ -10,18 +10,18 @@ use std::{
 /// A [`Future`] that will be ready when the [`Swansong`][crate::Swansong] has been
 /// stopped AND all guards are dropped.
 ///
-/// This type can also be used in blocking contexts with [`Shutdown::block`]
+/// This type can also be used in blocking contexts with [`ShutdownCompletion::block`]
 #[derive(Debug)]
-pub struct Shutdown(Arc<Inner>, Option<EventListener>);
+pub struct ShutdownCompletion(Arc<Inner>, Option<EventListener>);
 
-impl Shutdown {
+impl ShutdownCompletion {
     pub(crate) fn new(inner: &Arc<Inner>) -> Self {
         Self(Arc::clone(inner), None)
     }
 
     /// Blocks the current thread until shutdown is complete.
     ///
-    /// Do not use this in async contexts. Instead, await this [`Shutdown`].
+    /// Do not use this in async contexts. Instead, await this [`ShutdownCompletion`].
     pub fn block(self) {
         let Self(inner, mut zero_listener) = self;
         loop {
@@ -44,7 +44,7 @@ impl Shutdown {
     }
 }
 
-impl Future for Shutdown {
+impl Future for ShutdownCompletion {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {

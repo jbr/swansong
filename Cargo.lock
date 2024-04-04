@@ -463,6 +463,8 @@ dependencies = [
  "env_logger",
  "event-listener 5.2.0",
  "fastrand",
+ "futures-core",
+ "futures-io",
  "futures-lite",
  "log",
  "pin-project-lite",

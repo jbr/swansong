@@ -1,6 +1,7 @@
 use super::Inner;
 use crate::Guard;
-use futures_lite::{AsyncBufRead, AsyncRead, AsyncWrite, Stream};
+use futures_core::Stream;
+use futures_io::{AsyncBufRead, AsyncRead, AsyncWrite};
 use std::{
     future::Future,
     ops::{Deref, DerefMut},
