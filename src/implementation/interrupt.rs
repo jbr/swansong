@@ -1,4 +1,4 @@
-use crate::Inner;
+use crate::{Guard, Inner};
 use event_listener::EventListener;
 use std::{
     ops::{Deref, DerefMut},
@@ -26,16 +26,8 @@ pin_project_lite::pin_project! {
         inner: WeakInner,
         #[pin]
         wrapped_type: T,
-        guarded: bool,
+        guard: Option<Guard>,
         stop_listener: StopListener,
-    }
-
-    impl<T> PinnedDrop for Interrupt<T> {
-        fn drop(this: Pin<&mut Self>) {
-            if let Some(inner) = this.project().inner.upgrade() {
-                inner.decrement();
-            }
-        }
     }
 }
 
@@ -44,7 +36,7 @@ impl<T> Interrupt<T> {
         Self {
             inner: WeakInner(Arc::downgrade(inner)),
             wrapped_type,
-            guarded: false,
+            guard: None,
             stop_listener: StopListener(None),
         }
     }
@@ -53,10 +45,16 @@ impl<T> Interrupt<T> {
     #[must_use]
     pub fn guarded(mut self) -> Self {
         if let Some(inner) = self.inner.upgrade() {
-            inner.increment();
-            self.guarded = true;
+            self.guard = Some(Guard::new(&inner));
         }
         self
+    }
+
+    /// Take the wrapped type out of this Interrupt.
+    ///
+    /// If the interrupt is guarded with [`Interrupt::guarded`], this will decrement the guard count.
+    pub fn into_inner(self) -> T {
+        self.wrapped_type
     }
 
     pub(crate) fn is_stopped(&self) -> bool {
