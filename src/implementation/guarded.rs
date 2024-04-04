@@ -20,8 +20,8 @@ pin_project_lite::pin_project! {
     /// Guarded implements Future, Stream, Clone, Debug, AsyncRead, and AsyncWrite when the wrapped
     /// type also does.
     ///
-    /// Guarded implements Deref and DerefMut to the wrapped type.
-    #[derive(Clone, Debug)]
+    /// Guarded implements [`Deref`] and [`DerefMut`] to the wrapped type.
+    #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct Guarded<T> {
         guard: Guard,
         #[pin]
@@ -188,14 +188,5 @@ impl<T: tokio::io::AsyncBufRead> tokio::io::AsyncBufRead for Guarded<T> {
 
     fn consume(self: Pin<&mut Self>, amt: usize) {
         self.project().wrapped_type.consume(amt);
-    }
-}
-
-impl<T, U> PartialEq<U> for Guarded<T>
-where
-    T: PartialEq<U>,
-{
-    fn eq(&self, other: &U) -> bool {
-        self.wrapped_type.eq(other)
     }
 }

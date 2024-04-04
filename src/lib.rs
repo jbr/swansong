@@ -100,9 +100,18 @@ pub use implementation::{Guard, Guarded, Interrupt, ShutdownCompletion};
 ///
 /// See crate level docs for overview and example.
 ///
+/// Two Swansongs are [`Eq`] if and only if they are clones of each other.
 #[derive(Clone, Debug, Default)]
 pub struct Swansong {
     inner: Arc<Inner>,
+}
+
+impl Eq for Swansong {}
+
+impl PartialEq for Swansong {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
