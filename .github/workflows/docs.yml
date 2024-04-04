@@ -26,7 +26,6 @@ jobs:
       run: >-
         RUSTDOCFLAGS="-Z unstable-options --enable-index-page"
         cargo +nightly doc
-        --no-deps
         --all
         --all-features
     - name: Fix permissions
