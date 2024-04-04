@@ -28,6 +28,7 @@ jobs:
         cargo +nightly doc
         --no-deps
         --all
+        --all-features
     - name: Fix permissions
       run: |
         chmod -c -R +rX "./target/doc" | while read line; do

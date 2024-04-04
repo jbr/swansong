@@ -8,13 +8,13 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/jbr/swansong"
 
-
 [dependencies]
 event-listener = "5.2.0"
 futures-core = "0.3.30"
-futures-io = "0.3.30"
+futures-io = { version = "0.3.30", optional = true }
 log = "0.4.21"
 pin-project-lite = "0.2.14"
+tokio = { version = "1.37.0", optional = true }
 
 [dev-dependencies]
 async-executor = "1.9.1"
@@ -24,3 +24,8 @@ env_logger = "0.11.3"
 fastrand = "2.0.2"
 futures-lite = "2.3.0"
 test-harness = "0.2.0"
+
+[features]
+tokio = ["dep:tokio"]
+futures-io = ["dep:futures-io"]
+default = []

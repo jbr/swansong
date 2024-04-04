@@ -5,14 +5,17 @@ use std::{
     sync::{Arc, Weak},
 };
 
+#[cfg(any(feature = "tokio", feature = "futures-io"))]
 mod async_read;
+#[cfg(any(feature = "tokio", feature = "futures-io"))]
 mod async_write;
+
 mod future;
 mod iterator;
 mod stream;
 
 pin_project_lite::pin_project! {
-    /// A wrapper type that implements Stream when wrapping a Stream and Future when wrapping a
+    /// A wrapper type that implements Stream when wrapping a [`Stream`] and [`Future`] when wrapping a
     /// Future
     ///
     /// When the associated [`Swansong`][crate::Swansong] is stopped with
@@ -60,6 +63,7 @@ impl<T> Interrupt<T> {
         self.inner.is_stopped()
     }
 
+    #[cfg(any(feature = "futures-io", feature = "tokio"))]
     pub(crate) fn is_stopped_relaxed(&self) -> bool {
         self.inner.is_stopped_relaxed()
     }
