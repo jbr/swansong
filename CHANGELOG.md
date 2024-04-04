@@ -6,6 +6,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/jbr/swansong/compare/v0.2.0...v0.3.0) - 2024-04-04
+
+### Added
+- add eq and partial eq implementations
+- add Interrupt::into_inner
+- add predicates on ShutdownState
+- [**breaking**] make futures-io optional, add tokio feature
+- [**breaking**] another iteration on the public interface and docs
+
+### Fixed
+- make timeout slower for windows
+
+### Other
+- fix references to old api
+- *(actions)* document deps
+- *(deps)* update codecov/codecov-action action to v4.2.0
+- Add renovate.json
+- *(deps)* bump async-executor from 1.8.0 to 1.9.1
+- *(deps)* bump pin-project-lite from 0.2.13 to 0.2.14
+- *(deps)* bump actions/configure-pages from 4 to 5
+- *(deps)* bump codecov/codecov-action from 4.0.1 to 4.1.1
+- Update README.md
+
 ## [0.2.0](https://github.com/jbr/swansong/compare/v0.1.0...v0.2.0) - 2024-04-01
 
 ### Added
