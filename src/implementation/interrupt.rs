@@ -22,12 +22,24 @@ pin_project_lite::pin_project! {
     /// [`Swansong::shut_down`][crate::Swansong::shut_down] or all clones of the [`Swansong`] have dropped,
     /// the Future or Stream within this Stop will wake and return `Poll::Ready(None)` on next poll,
     /// regardless of where it is being polled.
+    #[derive(Debug)]
     pub struct Interrupt<T> {
         inner: WeakInner,
         #[pin]
         wrapped_type: T,
         guard: Option<Guard>,
         stop_listener: StopListener,
+    }
+}
+
+impl<T: Eq> Eq for Interrupt<T> {}
+
+impl<T, U> PartialEq<Interrupt<U>> for Interrupt<T>
+where
+    T: PartialEq<U>,
+{
+    fn eq(&self, other: &Interrupt<U>) -> bool {
+        self.inner.ptr_eq(&other.inner) && self.wrapped_type == other.wrapped_type
     }
 }
 
@@ -81,6 +93,7 @@ impl<T> DerefMut for Interrupt<T> {
     }
 }
 
+#[derive(Debug)]
 struct WeakInner(Weak<Inner>);
 impl Deref for WeakInner {
     type Target = Weak<Inner>;
@@ -100,6 +113,7 @@ impl WeakInner {
     }
 }
 
+#[derive(Debug)]
 struct StopListener(Option<EventListener>);
 impl StopListener {
     fn listen(&mut self, weak_inner: &WeakInner) -> Option<&mut EventListener> {

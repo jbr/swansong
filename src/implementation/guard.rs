@@ -6,6 +6,8 @@ use std::sync::{Arc, Weak};
 /// [`Swansong`][crate::Swansong] to complete.
 ///
 /// Each clone is treated distinctly in the guard count.
+///
+/// Two guards are [`Eq`] if they share the same [`Swansong`][crate::Swansong].
 #[derive(Debug)]
 pub struct Guard(Weak<Inner>);
 impl Guard {
@@ -29,5 +31,12 @@ impl Clone for Guard {
             inner.increment();
         }
         Self(self.0.clone())
+    }
+}
+
+impl Eq for Guard {}
+impl PartialEq for Guard {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ptr_eq(&other.0)
     }
 }
