@@ -19,7 +19,7 @@ pin_project_lite::pin_project! {
     /// Future
     ///
     /// When the associated [`Swansong`][crate::Swansong] is stopped with
-    /// [`Swansong::stop`][crate::Swansong::stop] or all clones of the [`Swansong`] have dropped,
+    /// [`Swansong::shut_down`][crate::Swansong::shut_down] or all clones of the [`Swansong`] have dropped,
     /// the Future or Stream within this Stop will wake and return `Poll::Ready(None)` on next poll,
     /// regardless of where it is being polled.
     pub struct Interrupt<T> {

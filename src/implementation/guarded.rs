@@ -14,9 +14,8 @@ pin_project_lite::pin_project! {
     ///
     /// Guarded does not stop the wrapped type on shutdown, but will delay shutdown until it is
     /// dropped. To stop the wrapped type, use
-    /// [`Swansong::stop_future`][crate::Swansong::stop_future] or
-    /// [`Swansong::stop_stream`][crate::Swansong::stop_stream]. To both stop the wrapped type and
-    /// also act as a guard, use [`Stop::guarded`][crate::Stop::Guarded].
+    /// [`Swansong::interrupt`][crate::Swansong::interrupt]. To both stop the wrapped type and
+    /// also act as a guard, use [`Interrupt::guarded`][crate::Interrupt::guarded].
     ///
     /// Guarded implements Future, Stream, Clone, Debug, AsyncRead, and AsyncWrite when the wrapped
     /// type also does.
