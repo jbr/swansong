@@ -105,7 +105,7 @@ pub struct Swansong {
     inner: Arc<Inner>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// enum that represents the current status of this `Swansong`.
 pub enum ShutdownState {
     /// Shutdown has not been initiated.
@@ -114,6 +114,26 @@ pub enum ShutdownState {
     ShuttingDown,
     /// Shutdown has been initiated and all guards have been Dropped.
     Complete,
+}
+
+impl ShutdownState {
+    /// Is the shutdown state [`ShutdownState::Running`]?
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        matches!(self, ShutdownState::Running)
+    }
+
+    /// Is the shutdown state [`ShutdownState::ShuttingDown`]?
+    #[must_use]
+    pub fn is_shutting_down(&self) -> bool {
+        matches!(self, ShutdownState::ShuttingDown)
+    }
+
+    /// Is the shutdown state [`ShutdownState::Complete`]?
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        matches!(self, ShutdownState::Complete)
+    }
 }
 
 impl Swansong {
