@@ -47,13 +47,17 @@ async fn swansong() {
     let guard = swansong.guard();
     let guard2 = guard.clone();
     assert_eq!(swansong.guard_count(), 2);
+    assert!(swansong.state().is_running());
     assert!(poll_manually(future.as_mut()).await.is_pending());
     swansong.shut_down();
+    assert!(swansong.state().is_shutting_down());
     assert!(poll_manually(future.as_mut()).await.is_pending());
     drop(guard);
+    assert!(swansong.state().is_shutting_down());
     assert!(poll_manually(future.as_mut()).await.is_pending());
     drop(guard2);
     assert!(poll_manually(future.as_mut()).await.is_ready());
+    assert!(swansong.state().is_complete());
 }
 
 #[test(harness)]
