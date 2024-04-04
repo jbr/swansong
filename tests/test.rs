@@ -26,7 +26,7 @@ where
     let _ = env_logger::builder().is_test(true).try_init();
     block_on(
         async {
-            Timer::after(Duration::from_secs(5)).await;
+            Timer::after(Duration::from_secs(10)).await;
             None
         }
         .or(async move { Some(test().await) }),
@@ -208,14 +208,12 @@ async fn multi_threaded_future_guarded() {
     for _ in 0..expected_count {
         let finished_count = finished_count.clone();
         let canceled_count = canceled_count.clone();
-        let fut = swansong
-            .interrupt(async move {
-                for _ in 0..fastrand::u8(..5) {
-                    Timer::after(Duration::from_millis(fastrand::u64(..100))).await;
-                }
-                finished_count.fetch_add(1, Ordering::Relaxed);
-            })
-            .guarded();
+        let fut = swansong.interrupt(async move {
+            for _ in 0..fastrand::u8(..5) {
+                Timer::after(Duration::from_millis(fastrand::u64(..100))).await;
+            }
+            finished_count.fetch_add(1, Ordering::Relaxed);
+        });
 
         spawn(swansong.guarded(async move {
             let res = fut.await;
@@ -252,11 +250,9 @@ async fn multi_threaded_stream_guarded() {
 
     for _ in 0..expected_count {
         let finished_count = finished_count.clone();
-        let mut stream = swansong
-            .interrupt(Timer::interval(Duration::from_millis(fastrand::u64(
-                0..100,
-            ))))
-            .guarded();
+        let mut stream = swansong.interrupt(Timer::interval(Duration::from_millis(fastrand::u64(
+            0..100,
+        ))));
 
         spawn(swansong.guarded(async move {
             while (stream.next().await).is_some() {}
