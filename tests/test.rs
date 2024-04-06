@@ -2,6 +2,7 @@ use async_global_executor::spawn;
 use async_io::{block_on, Timer};
 use futures_lite::{FutureExt, Stream, StreamExt};
 use std::{
+    env,
     future::{self, Future, IntoFuture},
     ops::Add,
     pin::{pin, Pin},
@@ -23,6 +24,15 @@ where
     O: Termination,
     Fut: Future<Output = O> + Send,
 {
+    if let Some(seed) = env::var("TEST_SEED")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        fastrand::seed(seed);
+    } else {
+        let seed = fastrand::get_seed();
+        println!("TEST_SEED={seed}");
+    }
     let _ = env_logger::builder().is_test(true).try_init();
     block_on(
         async {
