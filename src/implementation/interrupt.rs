@@ -124,8 +124,10 @@ impl StopListener {
         let inner = weak_inner.upgrade()?;
         let listener = listener.insert(inner.listen_stop());
         if inner.is_stopped() {
+            log::trace!("inner was stopped after registering new listener");
             None
         } else {
+            log::trace!("registered new listener");
             Some(listener)
         }
     }

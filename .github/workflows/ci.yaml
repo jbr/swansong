@@ -34,6 +34,17 @@ jobs:
       env:
         RUST_LOG: trace
 
+    - name: Tests (futures-io)
+      run: cargo test --features futures-io
+      env:
+        RUST_LOG: trace
+
+    - name: Tests (tokio)
+      run: cargo test --features tokio
+      env:
+        RUST_LOG: trace
+
+
   check_fmt_and_docs:
     name: Checking fmt, clippy, and docs
     runs-on: ubuntu-latest

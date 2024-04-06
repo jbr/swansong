@@ -1,6 +1,6 @@
 use crate::Interrupt;
 use std::{
-    io::{IoSliceMut, Result},
+    io::Result,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -22,7 +22,7 @@ impl<T: futures_io::AsyncRead> futures_io::AsyncRead for Interrupt<T> {
     fn poll_read_vectored(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        bufs: &mut [IoSliceMut<'_>],
+        bufs: &mut [std::io::IoSliceMut<'_>],
     ) -> Poll<Result<usize>> {
         if self.is_stopped_relaxed() {
             Poll::Ready(Ok(0))
