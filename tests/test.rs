@@ -1,5 +1,3 @@
-use async_global_executor::spawn;
-use async_io::{block_on, Timer};
 use futures_lite::{FutureExt, Stream, StreamExt};
 use std::{
     env,
@@ -13,10 +11,43 @@ use std::{
     },
     task::{Context, Poll},
     thread::{self, sleep},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use swansong::Swansong;
 use test_harness::test;
+
+#[cfg(feature = "tokio")]
+mod runtime {
+    use std::{future::Future, time::Duration};
+    pub(super) use tokio::task::spawn;
+    pub(super) fn block_on<T>(future: impl Future<Output = T>) -> T {
+        tokio::runtime::Runtime::new().unwrap().block_on(future)
+    }
+    pub(super) async fn sleep(duration: Duration) {
+        tokio::time::sleep(duration).await;
+    }
+
+    pub(super) fn interval(duration: Duration) -> tokio_stream::wrappers::IntervalStream {
+        tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(duration))
+    }
+}
+
+#[cfg(not(feature = "tokio"))]
+mod runtime {
+    use std::{future::Future, time::Duration};
+
+    pub(super) fn interval(duration: Duration) -> async_io::Timer {
+        async_io::Timer::interval(duration)
+    }
+
+    pub(super) use async_global_executor::block_on;
+    pub(super) fn spawn<Fut: Future<Output = ()> + Send + 'static>(future: Fut) {
+        async_global_executor::spawn(future).detach();
+    }
+    pub(super) async fn sleep(duration: Duration) {
+        async_io::Timer::after(duration).await;
+    }
+}
 
 fn harness<F, Fut, O>(test: F) -> O
 where
@@ -34,12 +65,19 @@ where
         println!("TEST_SEED={seed}");
     }
     let _ = env_logger::builder().is_test(true).try_init();
-    block_on(
-        async {
-            Timer::after(Duration::from_secs(10)).await;
-            None
-        }
-        .or(async move { Some(test().await) }),
+    runtime::block_on(
+        async move { Some(test().await) }
+            .race(async {
+                runtime::sleep(Duration::from_secs(10)).await;
+                None
+            })
+            .race(async {
+                let start = Instant::now();
+                loop {
+                    runtime::sleep(Duration::from_millis(100)).await;
+                    log::info!("{:?}", Instant::now() - start);
+                }
+            }),
     )
     .expect("timed out")
 }
@@ -74,14 +112,14 @@ async fn swansong() {
 async fn multi_threaded() {
     let swansong = Swansong::new();
     let finished_count = Arc::new(AtomicU8::new(0));
-    let expected_count = fastrand::u8(..);
+    let expected_count = fastrand::u8(1..);
 
     for _ in 0..expected_count {
         let guard = swansong.guard();
         let finished_count = finished_count.clone();
         thread::spawn(move || {
             let _guard = guard;
-            sleep(Duration::from_millis(fastrand::u64(..500)));
+            sleep(Duration::from_millis(fastrand::u64(1..500)));
             finished_count.fetch_add(1, Ordering::Relaxed);
         });
     }
@@ -89,7 +127,7 @@ async fn multi_threaded() {
     thread::spawn({
         let swansong = swansong.clone();
         move || {
-            sleep(Duration::from_millis(fastrand::u64(..500)));
+            sleep(Duration::from_millis(fastrand::u64(1..500)));
             swansong.shut_down();
         }
     });
@@ -104,14 +142,14 @@ fn multi_threaded_blocking() {
     let _ = env_logger::builder().is_test(true).try_init();
     let swansong = Swansong::new();
     let finished_count = Arc::new(AtomicU8::new(0));
-    let expected_count = fastrand::u8(..);
+    let expected_count = fastrand::u8(1..);
 
     for _ in 0..expected_count {
         let guard = swansong.guard();
         let finished_count = finished_count.clone();
         thread::spawn(move || {
             let _guard = guard;
-            sleep(Duration::from_millis(fastrand::u64(..500)));
+            sleep(Duration::from_millis(fastrand::u64(1..500)));
             finished_count.fetch_add(1, Ordering::Relaxed);
         });
     }
@@ -119,7 +157,7 @@ fn multi_threaded_blocking() {
     thread::spawn({
         let swansong = swansong.clone();
         move || {
-            sleep(Duration::from_millis(fastrand::u64(..500)));
+            sleep(Duration::from_millis(fastrand::u64(1..500)));
             swansong.shut_down();
         }
     });
@@ -213,36 +251,34 @@ async fn multi_threaded_future_guarded() {
     let swansong = Swansong::new();
     let canceled_count = Arc::new(AtomicU8::new(0));
     let finished_count = Arc::new(AtomicU8::new(0));
-    let expected_count = fastrand::u8(..);
+    let expected_count = fastrand::u8(1..);
 
     for _ in 0..expected_count {
         let finished_count = finished_count.clone();
         let canceled_count = canceled_count.clone();
         let fut = swansong.interrupt(async move {
-            for _ in 0..fastrand::u8(..5) {
-                Timer::after(Duration::from_millis(fastrand::u64(..100))).await;
+            for _ in 0..fastrand::u8(1..5) {
+                runtime::sleep(Duration::from_millis(fastrand::u64(1..100))).await;
             }
             finished_count.fetch_add(1, Ordering::Relaxed);
         });
 
-        spawn(swansong.guarded(async move {
+        runtime::spawn(swansong.guarded(async move {
             let res = fut.await;
-            Timer::interval(Duration::from_millis(fastrand::u64(0..250))).await;
+            runtime::sleep(Duration::from_millis(fastrand::u64(1..250))).await;
             if res.is_none() {
                 canceled_count.fetch_add(1, Ordering::Relaxed);
             }
-        }))
-        .detach();
+        }));
     }
 
-    spawn({
+    runtime::spawn({
         let swansong = swansong.clone();
         async move {
-            Timer::after(Duration::from_millis(fastrand::u64(..500))).await;
+            runtime::sleep(Duration::from_millis(fastrand::u64(1..100))).await;
             swansong.shut_down();
         }
-    })
-    .detach();
+    });
 
     swansong.await;
 
@@ -256,30 +292,28 @@ async fn multi_threaded_future_guarded() {
 async fn multi_threaded_stream_guarded() {
     let swansong = Swansong::new();
     let finished_count = Arc::new(AtomicU8::new(0));
-    let expected_count = fastrand::u8(..);
+    let expected_count = fastrand::u8(1..);
 
     for _ in 0..expected_count {
         let finished_count = finished_count.clone();
-        let mut stream = swansong.interrupt(Timer::interval(Duration::from_millis(fastrand::u64(
-            0..100,
-        ))));
+        let mut stream = swansong.interrupt(runtime::interval(Duration::from_millis(
+            fastrand::u64(1..100),
+        )));
 
-        spawn(swansong.guarded(async move {
+        runtime::spawn(swansong.guarded(async move {
             while (stream.next().await).is_some() {}
-            Timer::interval(Duration::from_millis(fastrand::u64(0..250))).await;
+            runtime::sleep(Duration::from_millis(fastrand::u64(1..250))).await;
             finished_count.fetch_add(1, Ordering::Relaxed);
-        }))
-        .detach();
+        }));
     }
 
-    spawn({
+    runtime::spawn({
         let swansong = swansong.clone();
         async move {
-            Timer::after(Duration::from_millis(fastrand::u64(..500))).await;
+            runtime::sleep(Duration::from_millis(fastrand::u64(1..100))).await;
             swansong.shut_down();
         }
-    })
-    .detach();
+    });
 
     swansong.await;
 
@@ -338,14 +372,14 @@ async fn futures_io() {
 
     let mut async_write = swansong.guarded(Vec::new());
     async_write.write_all(b"hello").await.unwrap();
-    assert_eq!(async_write, b"hello");
+    assert_eq!(async_write.into_inner(), b"hello");
 }
 
 #[test]
 fn iterator() {
     let swansong = Swansong::new();
     let mut iter = swansong
-        .interrupt(std::iter::repeat_with(|| fastrand::u8(..)))
+        .interrupt(std::iter::repeat_with(|| fastrand::u8(1..)))
         .guarded();
     assert!(iter.next().is_some());
     assert!(iter.next().is_some());
@@ -359,7 +393,7 @@ fn iterator() {
 #[test]
 fn iterator_drop() {
     let swansong = Swansong::new();
-    let mut iter = swansong.interrupt(std::iter::repeat_with(|| fastrand::u8(..)));
+    let mut iter = swansong.interrupt(std::iter::repeat_with(|| fastrand::u8(1..)));
     assert!(iter.next().is_some());
     assert!(iter.next().is_some());
     drop(swansong);
