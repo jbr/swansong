@@ -402,7 +402,27 @@ fn iterator_drop() {
 }
 
 #[test]
-fn eq() {
+fn iterator_size_hint() {
+    let swansong = Swansong::new();
+    let iter = 0..10;
+    assert_eq!(iter.size_hint(), (10, Some(10)));
+
+    let iter = swansong.interrupt(0..10);
+    assert_eq!(iter.size_hint(), (0, Some(10)));
+}
+
+#[test]
+fn stream_size_hint() {
+    let swansong = Swansong::new();
+    let stream = futures_lite::stream::iter(0..10);
+    assert_eq!(stream.size_hint(), (10, Some(10)));
+
+    let stream = swansong.interrupt(futures_lite::stream::iter(0..10));
+    assert_eq!(stream.size_hint(), (0, Some(10)));
+}
+
+#[test]
+fn eq_and_assorted_other_conveniences() {
     let swansong = Swansong::new();
     let other = Swansong::new();
     assert_eq!(swansong, swansong.clone());
@@ -418,8 +438,15 @@ fn eq() {
     assert_ne!(guarded, swansong.guarded(String::from("goodbye")));
     assert_ne!(guarded, other.guarded(String::from("hello")));
 
+    // deref
+    assert_eq!(swansong.guarded("1").parse::<u8>().unwrap(), 1);
+
     let interrupt = swansong.interrupt(1);
     assert_eq!(interrupt, swansong.interrupt(1));
     assert_ne!(interrupt, swansong.interrupt(2));
     assert_ne!(interrupt, other.interrupt(1));
+
+    // into inner
+    let n: i32 = interrupt.into_inner();
+    assert_eq!(n, 1);
 }
