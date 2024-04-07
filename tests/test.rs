@@ -400,3 +400,26 @@ fn iterator_drop() {
     assert!(iter.next().is_none());
     assert!(iter.next().is_none());
 }
+
+#[test]
+fn eq() {
+    let swansong = Swansong::new();
+    let other = Swansong::new();
+    assert_eq!(swansong, swansong.clone());
+    assert_ne!(swansong, other.clone());
+
+    let guard = swansong.guard();
+    assert_eq!(guard, guard.clone());
+    assert_eq!(guard, swansong.guard());
+    assert_ne!(guard, other.guard());
+
+    let guarded = swansong.guarded(String::from("hello"));
+    assert_eq!(guarded, swansong.guarded(String::from("hello")));
+    assert_ne!(guarded, swansong.guarded(String::from("goodbye")));
+    assert_ne!(guarded, other.guarded(String::from("hello")));
+
+    let interrupt = swansong.interrupt(1);
+    assert_eq!(interrupt, swansong.interrupt(1));
+    assert_ne!(interrupt, swansong.interrupt(2));
+    assert_ne!(interrupt, other.interrupt(1));
+}
