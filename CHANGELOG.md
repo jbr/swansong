@@ -6,6 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/jbr/swansong/compare/v0.3.0...v0.3.1) - 2024-05-29
+
+### Fixed
+- *(deps)* update rust crate event-listener to v5.3.1
+
+### Other
+- *(deps)* bump fastrand from 2.0.2 to 2.1.0
+- *(deps)* update codecov/codecov-action action to v4.4.1
+- *(deps)* update rust crate async-executor to v1.12.0
+- *(deps)* bump taiki-e/cache-cargo-install-action from 1 to 2
+- *(deps)* update rust crate async-executor to 1.11.0
+- *(deps)* bump codecov/codecov-action from 4.2.0 to 4.3.0
+- *(deps)* bump async-executor from 1.9.1 to 1.10.0
+
 ## [0.3.0](https://github.com/jbr/swansong/compare/v0.2.0...v0.3.0) - 2024-04-07
 
 ### Added
