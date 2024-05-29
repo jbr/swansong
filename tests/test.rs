@@ -11,15 +11,25 @@ use std::{
     },
     task::{Context, Poll},
     thread::{self, sleep},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use swansong::Swansong;
 use test_harness::test;
 
-#[cfg(feature = "tokio")]
+#[cfg(miri)]
+const TIMEOUT: Duration = Duration::from_secs(100);
+#[cfg(not(miri))]
+const TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(all(feature = "tokio", not(miri)))]
 mod runtime {
     use std::{future::Future, time::Duration};
-    pub(super) use tokio::task::spawn;
+    pub(super) fn spawn(future: impl Future + Send + 'static) {
+        tokio::task::spawn(async move {
+            future.await;
+        });
+    }
+
     pub(super) fn block_on<T>(future: impl Future<Output = T>) -> T {
         tokio::runtime::Runtime::new().unwrap().block_on(future)
     }
@@ -32,7 +42,7 @@ mod runtime {
     }
 }
 
-#[cfg(not(feature = "tokio"))]
+#[cfg(not(any(feature = "tokio", miri)))]
 mod runtime {
     use std::{future::Future, time::Duration};
 
@@ -41,14 +51,56 @@ mod runtime {
     }
 
     pub(super) use async_global_executor::block_on;
-    pub(super) fn spawn<Fut: Future<Output = ()> + Send + 'static>(future: Fut) {
-        async_global_executor::spawn(future).detach();
+    pub(super) fn spawn(future: impl Future + Send + 'static) {
+        async_global_executor::spawn(async move {
+            future.await;
+        })
+        .detach();
     }
     pub(super) async fn sleep(duration: Duration) {
         async_io::Timer::after(duration).await;
     }
 }
 
+#[cfg(miri)]
+mod runtime {
+    use futures_lite::stream::Stream;
+    use std::{future::Future, thread, time::Duration};
+
+    pub(super) fn spawn(fut: impl Future + Send + 'static) {
+        thread::spawn(move || {
+            block_on(async move {
+                fut.await;
+            })
+        });
+    }
+    pub(super) async fn sleep(duration: Duration) {
+        let (send, receive) = async_channel::bounded(1);
+        thread::spawn(move || {
+            thread::sleep(duration);
+            let _ = send.send_blocking(());
+        });
+        let _ = receive.recv().await;
+    }
+
+    pub(super) fn interval(period: Duration) -> impl Stream<Item = ()> + Unpin + Send + 'static {
+        let (send, receive) = async_channel::bounded(1);
+        thread::spawn(move || loop {
+            thread::sleep(period);
+            if send.send_blocking(()).is_err() {
+                break;
+            }
+        });
+
+        Box::pin(receive)
+    }
+
+    pub(super) fn block_on<Fut: Future>(fut: Fut) -> Fut::Output {
+        futures_lite::future::block_on(fut)
+    }
+}
+
+#[track_caller]
 fn harness<F, Fut, O>(test: F) -> O
 where
     F: FnOnce() -> Fut,
@@ -65,20 +117,10 @@ where
         println!("TEST_SEED={seed}");
     }
     let _ = env_logger::builder().is_test(true).try_init();
-    runtime::block_on(
-        async move { Some(test().await) }
-            .race(async {
-                runtime::sleep(Duration::from_secs(10)).await;
-                None
-            })
-            .race(async {
-                let start = Instant::now();
-                loop {
-                    runtime::sleep(Duration::from_millis(100)).await;
-                    log::info!("{:?}", Instant::now() - start);
-                }
-            }),
-    )
+    runtime::block_on(async move { Some(test().await) }.race(async {
+        runtime::sleep(TIMEOUT).await;
+        None
+    }))
     .expect("timed out")
 }
 
@@ -168,7 +210,12 @@ fn multi_threaded_blocking() {
         send.send(()).unwrap();
     });
 
+    #[cfg(miri)]
+    receive.recv().unwrap();
+
+    #[cfg(not(miri))]
     receive.recv_timeout(Duration::from_secs(5)).unwrap();
+
     assert_eq!(finished_count.load(Ordering::Relaxed), expected_count);
 }
 
