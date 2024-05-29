@@ -80,8 +80,10 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.7.3
       - name: Test with Miri
-        run: cargo miri test
-        continue-on-error: true
+        env:
+          RUST_BACKTRACE: 1
+          MIRIFLAGS: "-Zmiri-env-forward=RUST_BACKTRACE -Zmiri-ignore-leaks"
+        run: cargo +nightly miri test --tests
   coverage:
     runs-on: ubuntu-latest
 
