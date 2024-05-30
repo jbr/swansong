@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/jbr/swansong/compare/v0.3.1...v0.3.2) - 2024-05-30
+
+### Other
+- *(deps)* update rust crate tokio to v1.38.0
+- fix miri tests
+
 ## [0.3.1](https://github.com/jbr/swansong/compare/v0.3.0...v0.3.1) - 2024-05-29
 
 ### Fixed
