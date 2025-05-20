@@ -6,6 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/jbr/swansong/compare/v0.3.1...v0.3.2) - 2025-05-20
+
+### Other
+
+- fix miri tests again
+- perhaps fix format
+- *(deps)* update swatinem/rust-cache action to v2.7.8
+- *(deps)* update codecov/codecov-action action to v5
+- *(deps)* upgrade all deps
+- format
+- clippy
+- cache convco on main
+- *(deps)* bump async-io from 2.3.2 to 2.3.3
+- *(deps)* update codecov/codecov-action action to v4.5.0
+- *(deps)* bump test-harness from 0.2.0 to 0.3.0
+- *(deps)* update rust crate tokio to v1.38.0
+- fix miri tests
+
 ## [0.3.1](https://github.com/jbr/swansong/compare/v0.3.0...v0.3.1) - 2024-05-29
 
 ### Fixed
