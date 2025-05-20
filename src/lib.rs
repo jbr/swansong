@@ -46,6 +46,7 @@ guards must be dropped for shutdown to be considered complete. Guards can be cre
 
 ## Async Example
 ```rust
+# #![cfg(not(miri))]
 # use async_global_executor as executor;
 # use async_io::Timer;
 # use std::{future::pending, time::Duration};
@@ -61,6 +62,7 @@ swansong.shut_down().await;
 ## Sync example
 
 ```rust
+# #![cfg(not(miri))]
 # use std::{iter, thread, time::Duration};
 # use swansong::Swansong;
 let swansong = Swansong::new();

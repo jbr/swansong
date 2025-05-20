@@ -1,4 +1,4 @@
-use futures_lite::{FutureExt, Stream, StreamExt};
+use futures_lite::{Stream, StreamExt};
 use std::{
     env,
     future::{self, Future, IntoFuture},
@@ -16,8 +16,9 @@ use std::{
 use swansong::Swansong;
 use test_harness::test;
 
-#[cfg(miri)]
-const TIMEOUT: Duration = Duration::from_secs(100);
+#[cfg(not(miri))]
+use futures_lite::FutureExt;
+
 #[cfg(not(miri))]
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -75,24 +76,25 @@ mod runtime {
         });
     }
     pub(super) async fn sleep(duration: Duration) {
-        let (send, receive) = async_channel::bounded(1);
-        thread::spawn(move || {
+        let (send, receive) = flume::unbounded();
+        let jh = thread::spawn(move || {
             thread::sleep(duration);
-            let _ = send.send_blocking(());
+            let _ = send.send(());
         });
-        let _ = receive.recv().await;
+        receive.recv_async().await.unwrap();
+        jh.join().unwrap();
     }
 
     pub(super) fn interval(period: Duration) -> impl Stream<Item = ()> + Unpin + Send + 'static {
-        let (send, receive) = async_channel::bounded(1);
+        let (send, receive) = flume::unbounded();
         thread::spawn(move || loop {
             thread::sleep(period);
-            if send.send_blocking(()).is_err() {
+            if send.send(()).is_err() {
                 break;
             }
         });
 
-        Box::pin(receive)
+        receive.into_stream()
     }
 
     pub(super) fn block_on<Fut: Future>(fut: Fut) -> Fut::Output {
@@ -117,11 +119,17 @@ where
         println!("TEST_SEED={seed}");
     }
     let _ = env_logger::builder().is_test(true).try_init();
-    runtime::block_on(async move { Some(test().await) }.race(async {
+    #[cfg(not(miri))]
+    let res = runtime::block_on(async move { Some(test().await) }.race(async {
         runtime::sleep(TIMEOUT).await;
         None
     }))
-    .expect("timed out")
+    .expect("timed out");
+
+    #[cfg(miri)]
+    let res = runtime::block_on(test());
+
+    res
 }
 
 async fn poll_manually<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
@@ -155,28 +163,32 @@ async fn multi_threaded() {
     let swansong = Swansong::new();
     let finished_count = Arc::new(AtomicU8::new(0));
     let expected_count = fastrand::u8(1..);
+    let mut threads = vec![];
 
     for _ in 0..expected_count {
         let guard = swansong.guard();
         let finished_count = finished_count.clone();
-        thread::spawn(move || {
+        threads.push(thread::spawn(move || {
             let _guard = guard;
             sleep(Duration::from_millis(fastrand::u64(1..500)));
             finished_count.fetch_add(1, Ordering::Relaxed);
-        });
+        }));
     }
 
-    thread::spawn({
+    threads.push(thread::spawn({
         let swansong = swansong.clone();
         move || {
             sleep(Duration::from_millis(fastrand::u64(1..500)));
             swansong.shut_down();
         }
-    });
+    }));
 
     swansong.await;
 
     assert_eq!(finished_count.load(Ordering::Relaxed), expected_count);
+    for thread in threads {
+        thread.join().unwrap();
+    }
 }
 
 #[test]
@@ -185,24 +197,25 @@ fn multi_threaded_blocking() {
     let swansong = Swansong::new();
     let finished_count = Arc::new(AtomicU8::new(0));
     let expected_count = fastrand::u8(1..);
+    let mut threads = vec![];
 
     for _ in 0..expected_count {
         let guard = swansong.guard();
         let finished_count = finished_count.clone();
-        thread::spawn(move || {
+        threads.push(thread::spawn(move || {
             let _guard = guard;
             sleep(Duration::from_millis(fastrand::u64(1..500)));
             finished_count.fetch_add(1, Ordering::Relaxed);
-        });
+        }));
     }
 
-    thread::spawn({
+    threads.push(thread::spawn({
         let swansong = swansong.clone();
         move || {
             sleep(Duration::from_millis(fastrand::u64(1..500)));
             swansong.shut_down();
         }
-    });
+    }));
 
     let (send, receive) = std::sync::mpsc::channel();
     thread::spawn(move || {
@@ -217,6 +230,9 @@ fn multi_threaded_blocking() {
     receive.recv_timeout(Duration::from_secs(5)).unwrap();
 
     assert_eq!(finished_count.load(Ordering::Relaxed), expected_count);
+    for thread in threads {
+        thread.join().unwrap();
+    }
 }
 
 #[test(harness)]
@@ -340,7 +356,6 @@ async fn multi_threaded_stream_guarded() {
     let swansong = Swansong::new();
     let finished_count = Arc::new(AtomicU8::new(0));
     let expected_count = fastrand::u8(1..);
-
     for _ in 0..expected_count {
         let finished_count = finished_count.clone();
         let mut stream = swansong.interrupt(runtime::interval(Duration::from_millis(
