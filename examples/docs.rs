@@ -1,4 +1,4 @@
-use futures_lite::{stream::unfold, StreamExt};
+use futures_lite::{StreamExt, stream::unfold};
 
 fn main() {
     use async_global_executor as executor;
