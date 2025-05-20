@@ -4,7 +4,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::Arc,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 /// A [`Future`] that will be ready when the [`Swansong`][crate::Swansong] has been
@@ -55,18 +55,17 @@ impl Future for ShutdownCompletion {
                 log::trace!("stopped and zero, all done!");
                 return Poll::Ready(());
             }
-            let listener = match zero_listener {
-                Some(listener) => listener,
-                None => {
-                    log::trace!("registering new listener");
-                    let listener = zero_listener.insert(inner.listen_zero());
+            let listener = if let Some(listener) = zero_listener {
+                listener
+            } else {
+                log::trace!("registering new listener");
+                let listener = zero_listener.insert(inner.listen_zero());
 
-                    if inner.is_stopped() && inner.is_zero() {
-                        log::trace!("stopped and zero, all done!");
-                        return Poll::Ready(());
-                    }
-                    listener
+                if inner.is_stopped() && inner.is_zero() {
+                    log::trace!("stopped and zero, all done!");
+                    return Poll::Ready(());
                 }
+                listener
             };
             ready!(Pin::new(listener).poll(cx));
             log::trace!("zero event notified!");

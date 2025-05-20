@@ -3,7 +3,7 @@ use futures_core::Stream;
 use std::{
     future::Future,
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 impl<T: Stream> Stream for Interrupt<T> {
@@ -35,7 +35,7 @@ impl<T: Stream> Stream for Interrupt<T> {
                     ready!(Pin::new(listener).poll(cx));
                     **this.stop_listener = None;
                 }
-            };
+            }
         }
     }
 
