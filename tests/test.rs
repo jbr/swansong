@@ -3,11 +3,11 @@ use std::{
     env,
     future::{self, Future, IntoFuture},
     ops::Add,
-    pin::{Pin, pin},
+    pin::{pin, Pin},
     process::Termination,
     sync::{
-        Arc,
         atomic::{AtomicU8, Ordering},
+        Arc,
     },
     task::{Context, Poll},
     thread::{self, sleep},
@@ -85,12 +85,10 @@ mod runtime {
 
     pub(super) fn interval(period: Duration) -> impl Stream<Item = ()> + Unpin + Send + 'static {
         let (send, receive) = async_channel::bounded(1);
-        thread::spawn(move || {
-            loop {
-                thread::sleep(period);
-                if send.send_blocking(()).is_err() {
-                    break;
-                }
+        thread::spawn(move || loop {
+            thread::sleep(period);
+            if send.send_blocking(()).is_err() {
+                break;
             }
         });
 
@@ -397,8 +395,8 @@ async fn guarded_test_coverage() {
 #[test(harness)]
 async fn futures_io() {
     use futures_lite::{
-        AsyncBufReadExt, AsyncReadExt, AsyncWriteExt,
         io::{BufReader, Cursor},
+        AsyncBufReadExt, AsyncReadExt, AsyncWriteExt,
     };
     let swansong = Swansong::new();
 
