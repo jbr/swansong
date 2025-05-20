@@ -2,7 +2,7 @@ use super::Interrupt;
 use std::{
     future::Future,
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 impl<T: Future> Future for Interrupt<T> {
