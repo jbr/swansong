@@ -4,7 +4,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::Arc,
-    task::{Context, Poll, ready},
+    task::{ready, Context, Poll},
 };
 
 /// A [`Future`] that will be ready when the [`Swansong`][crate::Swansong] has been
