@@ -104,12 +104,12 @@ impl Deref for WeakInner {
 }
 impl WeakInner {
     fn is_stopped(&self) -> bool {
-        self.upgrade().as_deref().map_or(true, Inner::is_stopped)
+        self.upgrade().as_deref().is_none_or(Inner::is_stopped)
     }
     fn is_stopped_relaxed(&self) -> bool {
         self.upgrade()
             .as_deref()
-            .map_or(true, Inner::is_stopped_relaxed)
+            .is_none_or(Inner::is_stopped_relaxed)
     }
 }
 
@@ -120,7 +120,7 @@ impl StopListener {
         let Self(listener) = self;
         if let Some(listener) = listener {
             return Some(listener);
-        };
+        }
         let inner = weak_inner.upgrade()?;
         let listener = listener.insert(inner.listen_stop());
         if inner.is_stopped() {
