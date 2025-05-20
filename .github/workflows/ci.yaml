@@ -52,7 +52,7 @@ jobs:
     - uses: actions/checkout@master
     - uses: actions-rs/toolchain@v1
       with:
-        toolchain: stable
+        toolchain: nightly
         components: rustfmt, clippy
         override: true
 
