@@ -663,9 +663,9 @@ dependencies = [
 
 [[package]]
 name = "test-harness"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae861f7d521762a2e5524ceeb3a518fab2c06c25e217a1d7270b8c5e158c141b"
+checksum = "540dedb2dcfa0cff7a79ec955936440a13a75839b6ac14b834a8bbae929bb489"
 dependencies = [
  "proc-macro2",
  "quote",
