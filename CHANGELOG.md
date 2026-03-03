@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3](https://github.com/jbr/swansong/compare/v0.3.2...v0.3.3) - 2026-03-03
+
+### Added
+
+- Swansong::child, vaguely like supervision trees
+
+### Other
+
+- *(deps)* update actions/upload-pages-artifact action to v4
+- *(deps)* update codecov/codecov-action action to v5.5.2
+- *(deps)* update swatinem/rust-cache action to v2.8.2
+- *(deps)* update taiki-e/cache-cargo-install-action action to v3
+- *(deps)* update all deps
+- *(deps)* update actions/checkout action to v6
+- update release workflow to use trusted publishers
+
 ## [0.3.2](https://github.com/jbr/swansong/compare/v0.3.1...v0.3.2) - 2025-05-20
 
 ### Other
