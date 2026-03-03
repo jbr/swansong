@@ -1,25 +1,57 @@
+use super::guard::Guard;
 use event_listener::{Event, EventListener, IntoNotification};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Mutex, Weak,
+};
+
 #[derive(Debug, Default)]
 pub(crate) struct Inner {
     stop_event: Event,
     zero_event: Event,
     guard_count: AtomicUsize,
     stopped: AtomicBool,
+    children: Mutex<Vec<Weak<Inner>>>,
+    _parent_guard: Option<Guard>,
 }
 
 impl Inner {
+    pub(crate) fn new_child(parent_guard: Guard) -> Self {
+        Self {
+            _parent_guard: Some(parent_guard),
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn add_child(&self, child: Weak<Inner>) {
+        let mut children = self.children.lock().unwrap();
+        children.retain(|c| c.strong_count() > 0);
+        children.push(child);
+    }
+
     pub(crate) fn stop(&self) {
         log::trace!("intending to stop");
 
         if self.stopped.swap(true, Ordering::SeqCst) {
             log::trace!("was already stopped");
-        } else {
-            log::trace!("stopped");
-            self.stop_event.notify(usize::MAX.relaxed());
-            if self.is_zero() {
-                self.zero_event.notify(usize::MAX.relaxed());
-            }
+            return;
+        }
+
+        log::trace!("stopped");
+        self.stop_event.notify(usize::MAX.relaxed());
+
+        for child in self
+            .children
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(Weak::upgrade)
+        {
+            child.stop();
+        }
+
+        if self.is_zero() {
+            self.zero_event.notify(usize::MAX.relaxed());
         }
     }
 

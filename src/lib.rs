@@ -216,6 +216,47 @@ impl Swansong {
         self.inner.guard_count_relaxed()
     }
 
+    /// Create a child [`Swansong`] linked to this parent.
+    ///
+    /// The child can be independently shut down without affecting the parent. However, when
+    /// the parent is shut down, the child will also be shut down. The parent's shutdown will
+    /// not be considered complete until the child [`Swansong`] and any associated
+    /// [`ShutdownCompletion`]s are dropped.
+    ///
+    /// This supports multi-level hierarchies: a child can itself have children, forming a
+    /// tree. Shutdown propagates downward through the entire tree.
+    ///
+    /// # Performance
+    ///
+    /// Creating a child has O(n) cost where n is the number of live children, due to
+    /// cleanup of stale internal references. This is suitable for most use cases but may
+    /// not be ideal for very high-frequency child creation with many concurrent children.
+    ///
+    /// # Example: HTTP/3 server
+    ///
+    /// ```rust
+    /// # use swansong::Swansong;
+    /// let server = Swansong::new();
+    ///
+    /// // Each connection gets its own child swansong
+    /// let connection = server.child();
+    ///
+    /// // Connection can be shut down independently (e.g., on GOAWAY)
+    /// connection.shut_down();
+    ///
+    /// // Or the entire server can shut down, which also stops all connections
+    /// // server.shut_down().await;
+    /// ```
+    #[must_use]
+    pub fn child(&self) -> Swansong {
+        let child_inner = Arc::new(Inner::new_child(Guard::new(&self.inner)));
+        self.inner.add_child(Arc::downgrade(&child_inner));
+        if self.inner.is_stopped() {
+            child_inner.stop();
+        }
+        Swansong { inner: child_inner }
+    }
+
     /// Attach a guard to the provided type, delaying shutdown until it drops.
     ///
     /// This function returns a [`Guarded`] wrapper type provides transparent implementations of
