@@ -483,6 +483,181 @@ fn stream_size_hint() {
     assert_eq!(stream.size_hint(), (0, Some(10)));
 }
 
+#[test(harness)]
+async fn child_basic() {
+    let parent = Swansong::new();
+    let child = parent.child();
+    let mut parent_future = pin!(parent.clone().into_future());
+
+    assert!(parent.state().is_running());
+    assert!(child.state().is_running());
+
+    parent.shut_down();
+
+    // Parent stop propagates to child
+    assert!(child.state().is_complete());
+
+    // Parent is shutting down (waiting for child to be dropped)
+    assert!(parent.state().is_shutting_down());
+    assert!(poll_manually(parent_future.as_mut()).await.is_pending());
+
+    drop(child);
+    assert!(poll_manually(parent_future.as_mut()).await.is_ready());
+    assert!(parent.state().is_complete());
+}
+
+#[test(harness)]
+async fn child_independent_shutdown() {
+    let parent = Swansong::new();
+    let child = parent.child();
+
+    // Child can be stopped independently
+    child.shut_down();
+    assert!(child.state().is_complete());
+
+    // Parent is still running
+    assert!(parent.state().is_running());
+
+    // Parent still waiting for child to be fully dropped
+    assert!(parent.state().is_running());
+    drop(child);
+
+    // Now parent has no guards
+    assert!(parent.state().is_running());
+    parent.shut_down();
+    assert!(parent.state().is_complete());
+}
+
+#[test(harness)]
+async fn child_guards_delay_parent() {
+    let parent = Swansong::new();
+    let child = parent.child();
+    let guard = child.guard();
+    let mut parent_future = pin!(parent.clone().into_future());
+
+    parent.shut_down();
+
+    // Child is stopped but has a guard
+    assert!(child.state().is_shutting_down());
+    assert!(poll_manually(parent_future.as_mut()).await.is_pending());
+
+    drop(guard);
+    assert!(child.state().is_complete());
+    // Parent still waiting for child Swansong to be dropped
+    assert!(poll_manually(parent_future.as_mut()).await.is_pending());
+
+    drop(child);
+    assert!(poll_manually(parent_future.as_mut()).await.is_ready());
+}
+
+#[test(harness)]
+async fn child_with_interrupt() {
+    let parent = Swansong::new();
+    let child = parent.child();
+
+    let mut interrupt = child.interrupt(future::pending::<()>());
+    assert!(poll_manually(Pin::new(&mut interrupt)).await.is_pending());
+
+    // Parent stop propagates through child's interrupts
+    parent.shut_down();
+    assert_eq!(
+        poll_manually(Pin::new(&mut interrupt)).await,
+        Poll::Ready(None)
+    );
+
+    drop(interrupt);
+    drop(child);
+}
+
+#[test(harness)]
+async fn child_created_after_parent_stopped() {
+    let parent = Swansong::new();
+    parent.shut_down();
+
+    let child = parent.child();
+    // Child should be immediately stopped
+    assert!(child.state().is_complete());
+
+    drop(child);
+    assert!(parent.state().is_complete());
+}
+
+#[test(harness)]
+async fn child_multi_level() {
+    let grandparent = Swansong::new();
+    let parent = grandparent.child();
+    let child = parent.child();
+
+    assert!(grandparent.state().is_running());
+    assert!(parent.state().is_running());
+    assert!(child.state().is_running());
+
+    grandparent.shut_down();
+
+    // Propagates all the way down
+    assert!(parent.state().is_shutting_down());
+    assert!(child.state().is_complete());
+
+    drop(child);
+    assert!(parent.state().is_complete());
+
+    drop(parent);
+    assert!(grandparent.state().is_complete());
+}
+
+#[test(harness)]
+async fn child_multiple_children() {
+    let parent = Swansong::new();
+    let child1 = parent.child();
+    let child2 = parent.child();
+    let child3 = parent.child();
+    let mut parent_future = pin!(parent.clone().into_future());
+
+    parent.shut_down();
+
+    assert!(child1.state().is_complete());
+    assert!(child2.state().is_complete());
+    assert!(child3.state().is_complete());
+
+    assert!(poll_manually(parent_future.as_mut()).await.is_pending());
+    drop(child1);
+    assert!(poll_manually(parent_future.as_mut()).await.is_pending());
+    drop(child2);
+    assert!(poll_manually(parent_future.as_mut()).await.is_pending());
+    drop(child3);
+    assert!(poll_manually(parent_future.as_mut()).await.is_ready());
+}
+
+#[test(harness)]
+async fn child_multi_threaded() {
+    let parent = Swansong::new();
+    let finished_count = Arc::new(AtomicU8::new(0));
+    let expected_count = fastrand::u8(1..10);
+
+    for _ in 0..expected_count {
+        let child = parent.child();
+        let finished_count = finished_count.clone();
+        runtime::spawn(async move {
+            let guard = child.guard();
+            runtime::sleep(Duration::from_millis(fastrand::u64(1..200))).await;
+            finished_count.fetch_add(1, Ordering::Relaxed);
+            drop(guard);
+            child.shut_down();
+        });
+    }
+
+    runtime::spawn({
+        let parent = parent.clone();
+        async move {
+            runtime::sleep(Duration::from_millis(fastrand::u64(1..100))).await;
+            parent.shut_down();
+        }
+    });
+
+    parent.await;
+    assert_eq!(finished_count.load(Ordering::Relaxed), expected_count);
+}
+
 #[test]
 fn eq_and_assorted_other_conveniences() {
     let swansong = Swansong::new();
