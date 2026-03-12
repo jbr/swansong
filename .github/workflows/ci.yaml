@@ -27,7 +27,7 @@ jobs:
         override: true
 
     - name: Rust Cache
-      uses: Swatinem/rust-cache@v2.8.2
+      uses: Swatinem/rust-cache@v2.9.1
 
     - name: Tests
       run: cargo test
@@ -78,7 +78,7 @@ jobs:
           rustup override set nightly
           cargo miri setup
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@v2.9.1
       - name: Test with Miri
         env:
           RUST_BACKTRACE: 1
