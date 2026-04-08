@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4](https://github.com/jbr/swansong/compare/v0.3.3...v0.3.4) - 2026-04-08
+
+### Other
+
+- *(deps)* update codecov/codecov-action action to v6
+- *(deps)* update rust crate tokio to v1.51.1
+- *(deps)* update rust crate fastrand to v2.4.1
+- *(deps)* update rust crate fastrand to v2.4.0
+- *(deps)* update rust crate env_logger to v0.11.10
+- *(deps)* update codecov/codecov-action action to v5.5.4
+- *(deps)* update swatinem/rust-cache action to v2.9.1
+- *(deps)* update actions/deploy-pages action to v5
+
 ## [0.3.3](https://github.com/jbr/swansong/compare/v0.3.2...v0.3.3) - 2026-03-03
 
 ### Added
