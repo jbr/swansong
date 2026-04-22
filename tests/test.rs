@@ -6,8 +6,8 @@ use std::{
     pin::{pin, Pin},
     process::Termination,
     sync::{
-        atomic::{AtomicU8, Ordering},
-        Arc,
+        atomic::{AtomicU8, AtomicUsize, Ordering},
+        Arc, Mutex,
     },
     task::{Context, Poll},
     thread::{self, sleep},
@@ -484,73 +484,6 @@ fn stream_size_hint() {
 }
 
 #[test(harness)]
-async fn child_basic() {
-    let parent = Swansong::new();
-    let child = parent.child();
-    let mut parent_future = pin!(parent.clone().into_future());
-
-    assert!(parent.state().is_running());
-    assert!(child.state().is_running());
-
-    parent.shut_down();
-
-    // Parent stop propagates to child
-    assert!(child.state().is_complete());
-
-    // Parent is shutting down (waiting for child to be dropped)
-    assert!(parent.state().is_shutting_down());
-    assert!(poll_manually(parent_future.as_mut()).await.is_pending());
-
-    drop(child);
-    assert!(poll_manually(parent_future.as_mut()).await.is_ready());
-    assert!(parent.state().is_complete());
-}
-
-#[test(harness)]
-async fn child_independent_shutdown() {
-    let parent = Swansong::new();
-    let child = parent.child();
-
-    // Child can be stopped independently
-    child.shut_down();
-    assert!(child.state().is_complete());
-
-    // Parent is still running
-    assert!(parent.state().is_running());
-
-    // Parent still waiting for child to be fully dropped
-    assert!(parent.state().is_running());
-    drop(child);
-
-    // Now parent has no guards
-    assert!(parent.state().is_running());
-    parent.shut_down();
-    assert!(parent.state().is_complete());
-}
-
-#[test(harness)]
-async fn child_guards_delay_parent() {
-    let parent = Swansong::new();
-    let child = parent.child();
-    let guard = child.guard();
-    let mut parent_future = pin!(parent.clone().into_future());
-
-    parent.shut_down();
-
-    // Child is stopped but has a guard
-    assert!(child.state().is_shutting_down());
-    assert!(poll_manually(parent_future.as_mut()).await.is_pending());
-
-    drop(guard);
-    assert!(child.state().is_complete());
-    // Parent still waiting for child Swansong to be dropped
-    assert!(poll_manually(parent_future.as_mut()).await.is_pending());
-
-    drop(child);
-    assert!(poll_manually(parent_future.as_mut()).await.is_ready());
-}
-
-#[test(harness)]
 async fn child_with_interrupt() {
     let parent = Swansong::new();
     let child = parent.child();
@@ -580,52 +513,6 @@ async fn child_created_after_parent_stopped() {
 
     drop(child);
     assert!(parent.state().is_complete());
-}
-
-#[test(harness)]
-async fn child_multi_level() {
-    let grandparent = Swansong::new();
-    let parent = grandparent.child();
-    let child = parent.child();
-
-    assert!(grandparent.state().is_running());
-    assert!(parent.state().is_running());
-    assert!(child.state().is_running());
-
-    grandparent.shut_down();
-
-    // Propagates all the way down
-    assert!(parent.state().is_shutting_down());
-    assert!(child.state().is_complete());
-
-    drop(child);
-    assert!(parent.state().is_complete());
-
-    drop(parent);
-    assert!(grandparent.state().is_complete());
-}
-
-#[test(harness)]
-async fn child_multiple_children() {
-    let parent = Swansong::new();
-    let child1 = parent.child();
-    let child2 = parent.child();
-    let child3 = parent.child();
-    let mut parent_future = pin!(parent.clone().into_future());
-
-    parent.shut_down();
-
-    assert!(child1.state().is_complete());
-    assert!(child2.state().is_complete());
-    assert!(child3.state().is_complete());
-
-    assert!(poll_manually(parent_future.as_mut()).await.is_pending());
-    drop(child1);
-    assert!(poll_manually(parent_future.as_mut()).await.is_pending());
-    drop(child2);
-    assert!(poll_manually(parent_future.as_mut()).await.is_pending());
-    drop(child3);
-    assert!(poll_manually(parent_future.as_mut()).await.is_ready());
 }
 
 #[test(harness)]
@@ -686,4 +573,400 @@ fn eq_and_assorted_other_conveniences() {
     // into inner
     let n: i32 = interrupt.into_inner();
     assert_eq!(n, 1);
+}
+
+// ============================================================================
+// Specification tests — see docs/spec.md
+//
+// These tests encode the semantic contract in Sections 5.2–5.9 of the spec:
+// guards are the only units of work, shutdown propagates downward but not
+// upward, observation reports subtree state, child handle drop is transparent
+// (child != root), and root handle drop implicitly shuts down.
+// ============================================================================
+
+// --- 5.2: Guards are the only units of work ---
+
+#[test(harness)]
+async fn spec_child_creation_is_transparent() {
+    let parent = Swansong::new();
+    let _child = parent.child();
+    assert!(parent.state().is_running());
+    assert_eq!(parent.guard_count(), 0);
+}
+
+#[test(harness)]
+async fn spec_child_handle_drop_without_guards_is_transparent() {
+    let parent = Swansong::new();
+    drop(parent.child());
+    assert!(parent.state().is_running());
+    assert_eq!(parent.guard_count(), 0);
+}
+
+#[test(harness)]
+async fn spec_live_empty_child_does_not_delay_parent_completion() {
+    let parent = Swansong::new();
+    let _child = parent.child();
+    let mut fut = pin!(parent.clone().shut_down());
+    assert!(poll_manually(fut.as_mut()).await.is_ready());
+    assert!(parent.state().is_complete());
+}
+
+#[test(harness)]
+async fn spec_guarded_on_discarded_child_equivalent_to_parent() {
+    // `parent.child().guarded(X)` with immediately-discarded child handle
+    // is semantically identical to `parent.guarded(X)`.
+    let parent = Swansong::new();
+    let guarded = parent.child().guarded(future::pending::<()>());
+    assert_eq!(parent.guard_count(), 1);
+    let mut fut = pin!(parent.clone().shut_down());
+    assert!(poll_manually(fut.as_mut()).await.is_pending());
+    drop(guarded);
+    assert!(poll_manually(fut.as_mut()).await.is_ready());
+}
+
+#[test(harness)]
+async fn spec_children_do_not_count_as_guards() {
+    let parent = Swansong::new();
+    let _a = parent.child();
+    let _b = parent.child();
+    let _c = parent.child();
+    assert_eq!(parent.guard_count(), 0);
+}
+
+// --- 5.3: Propagation ---
+
+#[test(harness)]
+async fn spec_shutdown_propagates_downward() {
+    let parent = Swansong::new();
+    let child = parent.child();
+    assert!(child.state().is_running());
+    parent.shut_down();
+    assert!(!child.state().is_running());
+}
+
+#[test(harness)]
+async fn spec_shutdown_propagates_through_multi_level() {
+    let gp = Swansong::new();
+    let p = gp.child();
+    let c = p.child();
+    gp.shut_down();
+    assert!(!p.state().is_running());
+    assert!(!c.state().is_running());
+}
+
+#[test(harness)]
+async fn spec_child_shutdown_does_not_affect_parent() {
+    let parent = Swansong::new();
+    let child = parent.child();
+    child.shut_down();
+    assert!(child.state().is_complete());
+    assert!(parent.state().is_running());
+}
+
+#[test(harness)]
+async fn spec_siblings_are_independent() {
+    let parent = Swansong::new();
+    let a = parent.child();
+    let b = parent.child();
+    a.shut_down();
+    assert!(a.state().is_complete());
+    assert!(b.state().is_running());
+    assert!(parent.state().is_running());
+}
+
+#[test(harness)]
+async fn spec_parent_completion_waits_for_subtree_guards() {
+    let parent = Swansong::new();
+    let child = parent.child();
+    let guard = child.guard();
+    let mut fut = pin!(parent.clone().shut_down());
+    assert!(poll_manually(fut.as_mut()).await.is_pending());
+    drop(guard);
+    assert!(poll_manually(fut.as_mut()).await.is_ready());
+}
+
+// --- 5.4: Observation ---
+
+#[test(harness)]
+async fn spec_guard_count_is_subtree_sum() {
+    let parent = Swansong::new();
+    let child_a = parent.child();
+    let child_b = parent.child();
+    let grandchild = child_a.child();
+
+    let _g1 = parent.guard();
+    let _g2 = child_a.guard();
+    let _g3 = child_a.guard();
+    let _g4 = child_b.guard();
+    let _g5 = grandchild.guard();
+
+    assert_eq!(grandchild.guard_count(), 1);
+    assert_eq!(child_a.guard_count(), 3);
+    assert_eq!(child_b.guard_count(), 1);
+    assert_eq!(parent.guard_count(), 5);
+}
+
+#[test(harness)]
+async fn spec_parent_state_reflects_subtree() {
+    let parent = Swansong::new();
+    let child = parent.child();
+    let _g = child.guard();
+    parent.shut_down();
+    // Guard in child's subtree prevents parent from reaching Complete.
+    assert!(parent.state().is_shutting_down());
+}
+
+// --- 5.7: Edge cases ---
+
+#[test(harness)]
+async fn spec_guard_on_stopped_swansong_delays_completion() {
+    let swansong = Swansong::new();
+    swansong.shut_down();
+    let guard = swansong.guard();
+    let mut fut = pin!(swansong.clone().into_future());
+    assert!(poll_manually(fut.as_mut()).await.is_pending());
+    drop(guard);
+    assert!(poll_manually(fut.as_mut()).await.is_ready());
+}
+
+#[test(harness)]
+async fn spec_guard_outlives_child_handle() {
+    // A Guard created on a child, held past the drop of every child Swansong
+    // clone, must still contribute to the parent's subtree accounting.
+    let parent = Swansong::new();
+    let guard = {
+        let child = parent.child();
+        child.guard()
+    };
+    assert_eq!(parent.guard_count(), 1);
+    let mut fut = pin!(parent.clone().shut_down());
+    assert!(poll_manually(fut.as_mut()).await.is_pending());
+    drop(guard);
+    assert!(poll_manually(fut.as_mut()).await.is_ready());
+}
+
+#[test(harness)]
+async fn spec_interrupt_on_pinned_child_delegates_after_handle_drop() {
+    // If something (here, a Guard) pins the child's Inner, the child stays
+    // Running after its handle drops. An Interrupt on the child delegates
+    // to the wrapped type rather than terminating.
+    let parent = Swansong::new();
+    let (_guard, mut interrupt) = {
+        let child = parent.child();
+        (child.guard(), child.interrupt(future::pending::<()>()))
+    };
+    assert!(poll_manually(Pin::new(&mut interrupt)).await.is_pending());
+}
+
+#[test(harness)]
+async fn spec_interrupt_terminates_when_child_collected() {
+    // With no Guard and no ShutdownCompletion, the child's Inner is
+    // collected once its last Swansong clone drops. Interrupts on it return
+    // terminal via Weak::upgrade failing — no indefinite poll.
+    let parent = Swansong::new();
+    let mut interrupt = {
+        let child = parent.child();
+        child.interrupt(future::pending::<()>())
+    };
+    assert_eq!(
+        poll_manually(Pin::new(&mut interrupt)).await,
+        Poll::Ready(None)
+    );
+}
+
+// --- 5.8: Child handle-drop does not signal shutdown ---
+
+#[test(harness)]
+async fn spec_child_handle_drop_does_not_stop_the_child() {
+    // Dropping the last clone of a non-root Swansong must not signal
+    // shutdown. The parent is still Running; the outstanding Guard still
+    // counts in the parent's subtree total.
+    let parent = Swansong::new();
+    let _guard = {
+        let child = parent.child();
+        child.guard()
+    };
+    assert!(parent.state().is_running());
+    assert_eq!(parent.guard_count(), 1);
+}
+
+// --- 5.9: Root drop propagates downward ---
+
+#[test(harness)]
+async fn spec_root_drop_propagates_downward() {
+    let root = Swansong::new();
+    let child = root.child();
+    let grandchild = child.child();
+    drop(root);
+    assert!(!child.state().is_running());
+    assert!(!grandchild.state().is_running());
+}
+
+// ============================================================================
+// Stress tests — exercise the transition-propagation logic in inner.rs under
+// real thread interleavings. Most valuable under miri and the thread-sanitizer
+// CI job, where subtle races have a chance to surface.
+// ============================================================================
+
+#[test(harness)]
+async fn stress_racing_guard_transitions_on_node() {
+    // Hammer a single node with concurrent create/drop cycles. Exercises the
+    // empty↔nonempty transition detection and the ancestor walk under
+    // contention. If transitions are mis-attributed, the parent's subtree
+    // count will drift from zero.
+    let parent = Swansong::new();
+    let child = parent.child();
+
+    #[cfg(miri)]
+    let (iters, workers) = (3usize, 2usize);
+    #[cfg(not(miri))]
+    let (iters, workers) = (500usize, 4usize);
+
+    let mut threads = vec![];
+    for _ in 0..workers {
+        let child = child.clone();
+        threads.push(thread::spawn(move || {
+            for _ in 0..iters {
+                let g = child.guard();
+                drop(g);
+            }
+        }));
+    }
+    for t in threads {
+        t.join().unwrap();
+    }
+
+    assert_eq!(child.guard_count(), 0);
+    assert_eq!(parent.guard_count(), 0);
+    assert!(child.state().is_running());
+    assert!(parent.state().is_running());
+}
+
+#[test(harness)]
+async fn stress_sibling_guards_common_ancestor() {
+    // Many workers each create and drop guards on their own sibling child of
+    // a shared parent. Exercises concurrent ancestor-walks that meet at the
+    // parent's nonempty_kids counter.
+    let parent = Swansong::new();
+
+    #[cfg(miri)]
+    let (iters, siblings) = (2usize, 3usize);
+    #[cfg(not(miri))]
+    let (iters, siblings) = (200usize, 6usize);
+
+    let mut threads = vec![];
+    for _ in 0..siblings {
+        let child = parent.child();
+        threads.push(thread::spawn(move || {
+            for _ in 0..iters {
+                let g = child.guard();
+                drop(g);
+            }
+            child
+        }));
+    }
+    let children: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+
+    assert_eq!(parent.guard_count(), 0);
+    for child in &children {
+        assert_eq!(child.guard_count(), 0);
+        assert!(child.state().is_running());
+    }
+    assert!(parent.state().is_running());
+}
+
+#[test(harness)]
+async fn stress_deep_tree_concurrent_guards() {
+    // Root → middle → leaf tree, with workers holding guards at different
+    // depths. Exercises multi-level ancestor walks under contention.
+    let root = Swansong::new();
+    let mid = root.child();
+    let leaf = mid.child();
+
+    #[cfg(miri)]
+    let (iters, workers) = (2usize, 2usize);
+    #[cfg(not(miri))]
+    let (iters, workers) = (200usize, 4usize);
+
+    let mut threads = vec![];
+    for _ in 0..workers {
+        let leaf = leaf.clone();
+        let mid = mid.clone();
+        let root = root.clone();
+        threads.push(thread::spawn(move || {
+            for _ in 0..iters {
+                let g_leaf = leaf.guard();
+                let g_mid = mid.guard();
+                let g_root = root.guard();
+                drop(g_leaf);
+                drop(g_mid);
+                drop(g_root);
+            }
+        }));
+    }
+    for t in threads {
+        t.join().unwrap();
+    }
+
+    assert_eq!(leaf.guard_count(), 0);
+    assert_eq!(mid.guard_count(), 0);
+    assert_eq!(root.guard_count(), 0);
+}
+
+#[test(harness)]
+async fn stress_child_creation_racing_shutdown() {
+    // Create children from multiple workers while another thread initiates
+    // parent shutdown. Every child produced must either be stopped
+    // (propagation reached it) or created-already-stopped. No child may
+    // remain Running after the shutdown completes.
+    let parent = Swansong::new();
+
+    #[cfg(miri)]
+    let (iters, creators) = (3usize, 2usize);
+    #[cfg(not(miri))]
+    let (iters, creators) = (40usize, 4usize);
+
+    let children: Arc<Mutex<Vec<Swansong>>> = Arc::new(Mutex::new(vec![]));
+    let started = Arc::new(AtomicUsize::new(0));
+
+    let mut threads = vec![];
+    for _ in 0..creators {
+        let parent = parent.clone();
+        let children = Arc::clone(&children);
+        let started = Arc::clone(&started);
+        threads.push(thread::spawn(move || {
+            started.fetch_add(1, Ordering::Relaxed);
+            for _ in 0..iters {
+                let child = parent.child();
+                children.lock().unwrap().push(child);
+            }
+        }));
+    }
+
+    threads.push(thread::spawn({
+        let parent = parent.clone();
+        let started = Arc::clone(&started);
+        move || {
+            // Let creators get started before pulling the trigger
+            while started.load(Ordering::Relaxed) < creators {
+                thread::yield_now();
+            }
+            sleep(Duration::from_millis(fastrand::u64(0..10)));
+            parent.shut_down();
+        }
+    }));
+
+    for t in threads {
+        t.join().unwrap();
+    }
+
+    let children = children.lock().unwrap();
+    for child in children.iter() {
+        assert!(
+            !child.state().is_running(),
+            "child still Running after parent shutdown; state={:?}",
+            child.state()
+        );
+    }
+    assert!(parent.state().is_complete());
 }

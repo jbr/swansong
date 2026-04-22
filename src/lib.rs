@@ -103,9 +103,24 @@ pub use implementation::{Guard, Guarded, Interrupt, ShutdownCompletion};
 /// See crate level docs for overview and example.
 ///
 /// Two Swansongs are [`Eq`] if and only if they are clones of each other.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug)]
 pub struct Swansong {
     inner: Arc<Inner>,
+}
+
+impl Clone for Swansong {
+    fn clone(&self) -> Self {
+        self.inner.swansong_clone();
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl Default for Swansong {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Eq for Swansong {}
@@ -151,7 +166,9 @@ impl Swansong {
     /// Construct a new `Swansong`.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            inner: Inner::new_root(),
+        }
     }
 
     /// Initiate graceful shutdown.
@@ -210,10 +227,18 @@ impl Swansong {
         Guard::new(&self.inner)
     }
 
-    /// The current number of outstanding `Guard`s.
+    /// The total number of outstanding `Guard`s in this Swansong's subtree.
+    ///
+    /// For a root or leaf Swansong with no children, this is just the Guards created
+    /// via this Swansong (and its clones). For a Swansong with children, it is the
+    /// sum of Guards held in this node plus all Guards in all descendant subtrees.
+    /// Child Swansong handles themselves are not counted as Guards; only real
+    /// `Guard` instances are.
+    ///
+    /// This performs an `O(subtree)` walk; prefer not to call it in a hot path.
     #[must_use]
     pub fn guard_count(&self) -> usize {
-        self.inner.guard_count_relaxed()
+        self.inner.guard_count_subtree()
     }
 
     /// Create a child [`Swansong`] linked to this parent.
@@ -249,12 +274,9 @@ impl Swansong {
     /// ```
     #[must_use]
     pub fn child(&self) -> Swansong {
-        let child_inner = Arc::new(Inner::new_child(Guard::new(&self.inner)));
-        self.inner.add_child(Arc::downgrade(&child_inner));
-        if self.inner.is_stopped() {
-            child_inner.stop();
+        Swansong {
+            inner: Inner::new_child(&self.inner),
         }
-        Swansong { inner: child_inner }
     }
 
     /// Attach a guard to the provided type, delaying shutdown until it drops.
@@ -271,10 +293,14 @@ impl Swansong {
     }
 }
 
-/// If we are dropping the only [`Swansong`], stop the associated futures
+/// If we are dropping the last `Swansong` handle to a **root** node, stop the
+/// associated futures. Dropping the last handle to a **child** (non-root) node
+/// does not signal shutdown: the parent remains the governing authority, and
+/// the child stays in its current state until the parent propagates stop or
+/// until all Guards in the child's subset naturally drain.
 impl Drop for Swansong {
     fn drop(&mut self) {
-        if 1 == Arc::strong_count(&self.inner) {
+        if self.inner.swansong_drop() && self.inner.is_root() {
             self.inner.stop();
         }
     }
