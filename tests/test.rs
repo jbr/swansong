@@ -545,6 +545,166 @@ async fn child_multi_threaded() {
     assert_eq!(finished_count.load(Ordering::Relaxed), expected_count);
 }
 
+#[test(harness)]
+async fn shutting_down_pending_then_ready() {
+    let swansong = Swansong::new();
+    let mut fut = pin!(swansong.shutting_down());
+    assert!(poll_manually(fut.as_mut()).await.is_pending());
+    swansong.shut_down();
+    assert!(poll_manually(fut.as_mut()).await.is_ready());
+}
+
+#[test(harness)]
+async fn shutting_down_ready_immediately_if_already_stopped() {
+    let swansong = Swansong::new();
+    swansong.shut_down();
+    let mut fut = pin!(swansong.shutting_down());
+    assert!(poll_manually(fut.as_mut()).await.is_ready());
+}
+
+#[test(harness)]
+async fn shutting_down_does_not_wait_for_guards() {
+    let swansong = Swansong::new();
+    let _guard = swansong.guard();
+    swansong.shut_down();
+    let mut fut = pin!(swansong.shutting_down());
+    assert!(poll_manually(fut.as_mut()).await.is_ready());
+    assert!(swansong.state().is_shutting_down());
+}
+
+#[test(harness)]
+async fn shutting_down_resolves_on_parent_stop() {
+    let parent = Swansong::new();
+    let child = parent.child();
+    let mut fut = pin!(child.shutting_down());
+    assert!(poll_manually(fut.as_mut()).await.is_pending());
+    parent.shut_down();
+    assert!(poll_manually(fut.as_mut()).await.is_ready());
+}
+
+#[test(harness)]
+async fn shutting_down_resolves_on_root_handle_drop() {
+    let root = Swansong::new();
+    let child = root.child();
+    let mut fut = pin!(child.shutting_down());
+    assert!(poll_manually(fut.as_mut()).await.is_pending());
+    drop(root);
+    assert!(poll_manually(fut.as_mut()).await.is_ready());
+}
+
+#[test(harness)]
+async fn shutting_down_reuses_listener_across_polls() {
+    // Polling a second time without a shutdown in between must reuse the
+    // listener stored on the first poll. This covers poll()'s `Some(listener)`
+    // reuse branch — reaching it requires the Relaxed stop check to still
+    // observe false on re-entry, which only holds if shut_down hasn't been
+    // called yet.
+    let swansong = Swansong::new();
+    let mut fut = pin!(swansong.shutting_down());
+    assert!(poll_manually(fut.as_mut()).await.is_pending());
+    assert!(poll_manually(fut.as_mut()).await.is_pending());
+    swansong.shut_down();
+    assert!(poll_manually(fut.as_mut()).await.is_ready());
+}
+
+#[test]
+fn shutting_down_block_with_pre_registered_listener() {
+    // Poll once to register a listener in the ShuttingDown's state, then move
+    // it out (ShuttingDown: Unpin) and hand it to block(). Exercises block()'s
+    // `Some(listener)` branch, which is only reachable when the caller has
+    // done a prior manual poll.
+    let _ = env_logger::builder().is_test(true).try_init();
+    let swansong = Swansong::new();
+    let mut fut = swansong.shutting_down();
+    let first_poll =
+        futures_lite::future::block_on(async { poll_manually(Pin::new(&mut fut)).await });
+    assert!(first_poll.is_pending());
+
+    let stopper = thread::spawn({
+        let swansong = swansong.clone();
+        move || {
+            sleep(Duration::from_millis(fastrand::u64(1..50)));
+            swansong.shut_down();
+        }
+    });
+
+    fut.block();
+    stopper.join().unwrap();
+}
+
+#[test]
+fn shutting_down_block_sync() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let swansong = Swansong::new();
+    let (send, receive) = std::sync::mpsc::channel();
+    thread::spawn({
+        let swansong = swansong.clone();
+        move || {
+            swansong.shutting_down().block();
+            send.send(()).unwrap();
+        }
+    });
+    thread::spawn({
+        let swansong = swansong.clone();
+        move || {
+            sleep(Duration::from_millis(fastrand::u64(1..50)));
+            swansong.shut_down();
+        }
+    });
+
+    #[cfg(miri)]
+    receive.recv().unwrap();
+    #[cfg(not(miri))]
+    receive.recv_timeout(Duration::from_secs(5)).unwrap();
+}
+
+#[test(harness)]
+async fn stress_shutting_down_racing_shutdown() {
+    // Race concurrent shut_down() against concurrent poll()/block() of a
+    // ShuttingDown future. Intended to probabilistically exercise the SeqCst
+    // re-check branches in both poll() (stopped observed true after listener
+    // registration) and block() (same pattern). These branches guard the
+    // narrow window between the Relaxed check and the listener registration
+    // + SeqCst check.
+    use std::sync::Barrier;
+
+    #[cfg(miri)]
+    let iters = 20usize;
+    #[cfg(not(miri))]
+    let iters = 2000usize;
+
+    for i in 0..iters {
+        let swansong = Swansong::new();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let stopper = thread::spawn({
+            let swansong = swansong.clone();
+            let barrier = Arc::clone(&barrier);
+            move || {
+                barrier.wait();
+                swansong.shut_down();
+            }
+        });
+
+        let waiter = thread::spawn({
+            let swansong = swansong.clone();
+            let barrier = Arc::clone(&barrier);
+            let use_block = i % 2 == 0;
+            move || {
+                barrier.wait();
+                if use_block {
+                    swansong.shutting_down().block();
+                } else {
+                    futures_lite::future::block_on(swansong.shutting_down());
+                }
+            }
+        });
+
+        stopper.join().unwrap();
+        waiter.join().unwrap();
+    }
+}
+
 #[test]
 fn eq_and_assorted_other_conveniences() {
     let swansong = Swansong::new();

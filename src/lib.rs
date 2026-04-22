@@ -96,7 +96,7 @@ use std::{future::IntoFuture, sync::Arc};
 
 mod implementation;
 use implementation::Inner;
-pub use implementation::{Guard, Guarded, Interrupt, ShutdownCompletion};
+pub use implementation::{Guard, Guarded, Interrupt, ShutdownCompletion, ShuttingDown};
 
 /// # 🦢 Shutdown manager
 ///
@@ -202,6 +202,25 @@ impl Swansong {
         } else {
             ShutdownState::Running
         }
+    }
+
+    /// Returns a [`ShuttingDown`] future that resolves when shutdown has been
+    /// initiated on this `Swansong`.
+    ///
+    /// This does not initiate shutdown — it only observes the transition from
+    /// [`ShutdownState::Running`] to [`ShutdownState::ShuttingDown`]. The future
+    /// resolves as soon as [`Swansong::shut_down`] is called (on this handle or
+    /// any parent), or when the last root handle is dropped.
+    ///
+    /// The returned future does not wait for outstanding [`Guard`]s to drop. To
+    /// wait for full shutdown (stopped _and_ all guards dropped), use
+    /// [`Swansong::shut_down`] or [`Swansong::into_future`].
+    ///
+    /// [`ShuttingDown`] can also be used in blocking contexts via
+    /// [`ShuttingDown::block`].
+    #[must_use]
+    pub fn shutting_down(&self) -> ShuttingDown {
+        ShuttingDown::new(&self.inner)
     }
 
     /// Wrap any type with an [`Interrupt`], allowing it to cancel or seal on shutdown.
