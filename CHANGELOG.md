@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5](https://github.com/jbr/swansong/compare/v0.3.4...v0.3.5) - 2026-05-25
+
+### Other
+
+- *(deps)* update rust crate log to v0.4.30
+- *(deps)* update codecov/codecov-action action to v6.0.1
+
 ## [0.3.4](https://github.com/jbr/swansong/compare/v0.3.3...v0.3.4) - 2026-04-22
 
 ### Added
