@@ -6,6 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5](https://github.com/jbr/swansong/compare/v0.3.4...v0.3.5) - 2026-07-22
+
+### Other
+
+- *(deps)* update rust-futures monorepo to v0.3.33
+- *(deps)* update rust crate fastrand to v2.5.0
+- *(deps)* update rust crate tokio to v1.53.1
+- *(deps)* update rust crate tokio-stream to v0.1.19
+- *(deps)* update rust crate env_logger to v0.11.11
+- *(deps)* update rust crate log to v0.4.33
+- *(deps)* update actions/checkout action to v7
+- *(deps)* update codecov/codecov-action action to v7
+- *(deps)* update codecov/codecov-action action to v6.0.2
+- *(deps)* update rust crate log to v0.4.32
+- *(deps)* update rust crate log to v0.4.31
+- *(deps)* update rust crate log to v0.4.30
+- *(deps)* update codecov/codecov-action action to v6.0.1
+
 ## [0.3.4](https://github.com/jbr/swansong/compare/v0.3.3...v0.3.4) - 2026-04-22
 
 ### Added
