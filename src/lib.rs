@@ -50,6 +50,9 @@ a shutdown stalls because of straggling guards, [`Swansong::guard_report`] retur
 [`GuardReport`] describing the outstanding guards, aggregated by creation site and including the
 age of the oldest guard at each site.
 
+Guards dropped after shutdown has been initiated also log their creation site at
+[`log::Level::Debug`], so enabling debug logging shows each straggler as it resolves.
+
 ## Async Example
 ```rust
 # #![cfg(not(miri))]

@@ -56,7 +56,9 @@ impl GuardInfo {
 /// Each Guard records the source location it was created at (captured with
 /// `#[track_caller]`). If shutdown stalls on straggling guards,
 /// [`Swansong::guard_report`][crate::Swansong::guard_report] reports the
-/// outstanding guards by creation site.
+/// outstanding guards by creation site. Additionally, a Guard dropped after
+/// shutdown has been initiated logs its creation site at
+/// [`log::Level::Debug`], making it easy to watch stragglers resolve.
 ///
 /// A Guard keeps its originating node's coordination state alive for the Guard's
 /// lifetime, so that its drop can correctly update ancestor subtree accounting
@@ -87,6 +89,19 @@ impl Guard {
 
 impl Drop for Guard {
     fn drop(&mut self) {
+        if self.inner.is_stopped_relaxed() && log::log_enabled!(log::Level::Debug) {
+            if let Some(age) = self.info.age() {
+                log::debug!(
+                    "guard created at {} dropped during shutdown after {age:.1?}",
+                    self.info.location()
+                );
+            } else {
+                log::debug!(
+                    "guard created at {} dropped during shutdown",
+                    self.info.location()
+                );
+            }
+        }
         self.inner.decrement_guard();
     }
 }
