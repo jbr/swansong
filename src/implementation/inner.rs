@@ -1,8 +1,41 @@
+use super::guard::GuardInfo;
 use event_listener::{Event, EventListener, IntoNotification};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex, Weak,
 };
+
+/// Registry of provenance records for the guards created on this node.
+///
+/// Entries are `Weak`: a dropped guard's entry simply stops upgrading, so
+/// `Guard::drop` performs no accounting here. Dead entries are swept
+/// opportunistically during registration (amortized O(1) per registration,
+/// keeping memory bounded by the live guard count) and at read time.
+#[derive(Debug, Default)]
+struct GuardRegistry {
+    guards: Vec<Weak<GuardInfo>>,
+    sweep_threshold: usize,
+}
+
+impl GuardRegistry {
+    const MIN_SWEEP_THRESHOLD: usize = 16;
+
+    fn register(&mut self, guard: Weak<GuardInfo>) {
+        if self.guards.len() >= self.sweep_threshold.max(Self::MIN_SWEEP_THRESHOLD) {
+            self.sweep();
+        }
+        self.guards.push(guard);
+    }
+
+    fn sweep(&mut self) {
+        self.guards.retain(|guard| guard.strong_count() > 0);
+        self.sweep_threshold = self.guards.len() * 2;
+    }
+
+    fn live(&self) -> impl Iterator<Item = Arc<GuardInfo>> + '_ {
+        self.guards.iter().filter_map(Weak::upgrade)
+    }
+}
 
 /// Packed subset nonemptiness: low 32 bits = `local_guards`, high 32 bits = `nonempty_kids`.
 /// The subset (this node + descendants) is nonempty iff `packed != 0`.
@@ -23,6 +56,7 @@ pub(crate) struct Inner {
     /// intermediate ancestor has been dropped.
     ancestors: Vec<Arc<Inner>>,
     children: Mutex<Vec<Weak<Inner>>>,
+    guard_registry: Mutex<GuardRegistry>,
 }
 
 impl Inner {
@@ -123,10 +157,11 @@ impl Inner {
         }
     }
 
-    /// Called by `Guard::new`. Increments this node's local guard count and, if the
-    /// subset transitioned from empty to nonempty, propagates the transition
-    /// up the ancestor chain.
-    pub(crate) fn increment_guard(&self) {
+    /// Called by `Guard::new`. Records the guard's provenance, increments this
+    /// node's local guard count and, if the subset transitioned from empty to
+    /// nonempty, propagates the transition up the ancestor chain.
+    pub(crate) fn increment_guard(&self, info: Weak<GuardInfo>) {
+        self.guard_registry.lock().unwrap().register(info);
         let prev = self.packed.fetch_add(LOCAL_ONE, Ordering::SeqCst);
         log::trace!("incremented local: {prev:#x} -> {:#x}", prev + LOCAL_ONE);
         if prev == 0 {
@@ -177,5 +212,54 @@ impl Inner {
             .map(|c| c.guard_count_subtree())
             .sum();
         local + children_sum
+    }
+
+    /// O(subtree) walk collecting provenance records for all live guards in
+    /// self and all live descendants.
+    pub(crate) fn guard_infos_subtree(&self, out: &mut Vec<Arc<GuardInfo>>) {
+        {
+            let mut registry = self.guard_registry.lock().unwrap();
+            registry.sweep();
+            out.extend(registry.live());
+        }
+        let children: Vec<Arc<Inner>> = {
+            let children = self.children.lock().unwrap();
+            children.iter().filter_map(Weak::upgrade).collect()
+        };
+        for child in children {
+            child.guard_infos_subtree(out);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::Location;
+
+    #[test]
+    fn registry_memory_stays_bounded_without_reads() {
+        let mut registry = GuardRegistry::default();
+        for _ in 0..1000 {
+            let info = GuardInfo::new(Location::caller());
+            registry.register(Arc::downgrade(&info));
+            drop(info);
+        }
+        assert!(registry.guards.len() <= GuardRegistry::MIN_SWEEP_THRESHOLD);
+    }
+
+    #[test]
+    fn registry_tracks_live_guards() {
+        let mut registry = GuardRegistry::default();
+        let infos: Vec<_> = (0..100)
+            .map(|_| {
+                let info = GuardInfo::new(Location::caller());
+                registry.register(Arc::downgrade(&info));
+                info
+            })
+            .collect();
+        assert_eq!(registry.live().count(), 100);
+        drop(infos);
+        assert_eq!(registry.live().count(), 0);
     }
 }
