@@ -10,6 +10,9 @@ pub(crate) use inner::Inner;
 mod guard;
 pub use guard::Guard;
 
+mod guard_report;
+pub use guard_report::{GuardReport, GuardReportEntry};
+
 mod interrupt;
 pub use interrupt::Interrupt;
 

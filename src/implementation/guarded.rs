@@ -30,6 +30,7 @@ pin_project_lite::pin_project! {
 }
 
 impl<T> Guarded<T> {
+    #[track_caller]
     pub(crate) fn new(inner: &Arc<Inner>, wrapped_type: T) -> Self {
         Self {
             guard: Guard::new(inner),

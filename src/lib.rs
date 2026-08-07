@@ -43,6 +43,12 @@ guards must be dropped for shutdown to be considered complete. Guards can be cre
   into the future.
 * [`Interrupt::guarded`] allows an Interrupt wrapper to also act as a guard.
 
+## Debugging stragglers
+
+Each [`Guard`] records the source location it was created at, captured with `#[track_caller]`. If
+a shutdown stalls because of straggling guards, [`Swansong::guard_report`] returns a
+[`GuardReport`] describing the outstanding guards, aggregated by creation site and including the
+age of the oldest guard at each site.
 
 ## Async Example
 ```rust
@@ -96,7 +102,9 @@ use std::{future::IntoFuture, sync::Arc};
 
 mod implementation;
 use implementation::Inner;
-pub use implementation::{Guard, Guarded, Interrupt, ShutdownCompletion, ShuttingDown};
+pub use implementation::{
+    Guard, GuardReport, GuardReportEntry, Guarded, Interrupt, ShutdownCompletion, ShuttingDown,
+};
 
 /// # 🦢 Shutdown manager
 ///
@@ -241,7 +249,11 @@ impl Swansong {
     }
 
     /// Returns a new [`Guard`], which forstalls shutdown until it is dropped.
+    ///
+    /// The guard records the source location of this call for diagnostic
+    /// purposes; see [`Swansong::guard_report`].
     #[must_use]
+    #[track_caller]
     pub fn guard(&self) -> Guard {
         Guard::new(&self.inner)
     }
@@ -258,6 +270,42 @@ impl Swansong {
     #[must_use]
     pub fn guard_count(&self) -> usize {
         self.inner.guard_count_subtree()
+    }
+
+    /// Report the provenance of the outstanding [`Guard`]s in this Swansong's
+    /// subtree.
+    ///
+    /// Every guard records the source location it was created at (captured
+    /// with `#[track_caller]`, so it points at the `swansong.guard()`,
+    /// `swansong.guarded(..)`, or `interrupt.guarded()` call in your code;
+    /// clones inherit the location of the guard they were cloned from). This
+    /// method aggregates the currently-live guards by creation site. It is
+    /// useful for debugging a shutdown that is stalled on straggling guards —
+    /// for example, by logging the report (via its [`Display`][std::fmt::Display]
+    /// implementation) when [`Swansong::shut_down`] has not completed within a
+    /// deadline.
+    ///
+    /// Like [`Swansong::guard_count`], this performs an `O(subtree)` walk, and
+    /// additionally takes a brief per-node lock; it is intended for
+    /// shutdown-time diagnostics rather than hot paths.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use swansong::Swansong;
+    /// let swansong = Swansong::new();
+    /// let guard = swansong.guard();
+    /// let report = swansong.guard_report();
+    /// assert_eq!(report.guard_count(), 1);
+    /// println!("{report}");
+    /// drop(guard);
+    /// assert!(swansong.guard_report().is_empty());
+    /// ```
+    #[must_use]
+    pub fn guard_report(&self) -> GuardReport {
+        let mut infos = Vec::new();
+        self.inner.guard_infos_subtree(&mut infos);
+        GuardReport::from_infos(infos)
     }
 
     /// Create a child [`Swansong`] linked to this parent.
@@ -307,6 +355,7 @@ impl Swansong {
     /// move the guard into the future.  See [`Guarded`] for more information about trait
     /// implementations on [`Guarded`]
     #[must_use]
+    #[track_caller]
     pub fn guarded<T>(&self, wrapped_type: T) -> Guarded<T> {
         Guarded::new(&self.inner, wrapped_type)
     }

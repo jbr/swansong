@@ -54,7 +54,11 @@ impl<T> Interrupt<T> {
     }
 
     /// Chainable setter to delay shutdown until this wrapper type has dropped.
+    ///
+    /// The guard records the source location of this call for diagnostic
+    /// purposes; see [`Swansong::guard_report`][crate::Swansong::guard_report].
     #[must_use]
+    #[track_caller]
     pub fn guarded(mut self) -> Self {
         if let Some(inner) = self.inner.upgrade() {
             self.guard = Some(Guard::new(&inner));
