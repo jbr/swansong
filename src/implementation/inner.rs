@@ -1,87 +1,56 @@
 use super::{
     guard::GuardInfo,
-    shard::{self, Shard},
+    shard::{self, Shard, ARRIVED, KIDS_ONE, STOPPED},
+    sync::{AtomicU64, AtomicUsize, Mutex},
 };
 use event_listener::{Event, EventListener, IntoNotification};
-use std::sync::{
-    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-    Arc, Mutex, Weak,
-};
+use std::sync::{atomic::Ordering, Arc, Weak};
 
-/// Registry of provenance records for the guards created on this node.
-///
-/// Entries are `Weak`: a dropped guard's entry simply stops upgrading, so
-/// `Guard::drop` performs no accounting here. Dead entries are swept
-/// opportunistically during registration (amortized O(1) per registration,
-/// keeping memory bounded by the live guard count) and at read time.
-#[derive(Debug, Default)]
-struct GuardRegistry {
-    guards: Vec<Weak<GuardInfo>>,
-    sweep_threshold: usize,
-}
-
-impl GuardRegistry {
-    const MIN_SWEEP_THRESHOLD: usize = 16;
-
-    fn register(&mut self, guard: Weak<GuardInfo>) {
-        if self.guards.len() >= self.sweep_threshold.max(Self::MIN_SWEEP_THRESHOLD) {
-            self.sweep();
-        }
-        self.guards.push(guard);
-    }
-
-    fn sweep(&mut self) {
-        self.guards.retain(|guard| guard.strong_count() > 0);
-        self.sweep_threshold = self.guards.len() * 2;
-    }
-
-    fn live(&self) -> impl Iterator<Item = Arc<GuardInfo>> + '_ {
-        self.guards.iter().filter_map(Weak::upgrade)
-    }
-}
-
-/// Packed subset nonemptiness: low 32 bits = `local_guards`, high 32 bits = `nonempty_kids`.
-/// The subset (this node + descendants) is nonempty iff `packed != 0`.
-const LOCAL_ONE: u64 = 1;
-const KIDS_ONE: u64 = 1 << 32;
-const LOCAL_MASK: u64 = 0xFFFF_FFFF;
+/// `Inner::state` counts the node's arrived shards in its low 32 bits; the subset (this node and
+/// its descendants) is nonempty iff that count is. [`STOPPED`] marks a stopped node, and for a
+/// child, [`ARRIVED`] marks that it has arrived at a parent shard, whose index is in bits 32..48.
+/// See `shard.rs` for the protocol.
+const SHARDS_MASK: u64 = 0xFFFF_FFFF;
+const PARENT_SHARD_SHIFT: u32 = 32;
+const PARENT_SHARD_MASK: u64 = 0xFFFF;
 
 #[derive(Debug)]
 pub(crate) struct Inner {
     /// Notified at stop, for [`ShuttingDown`][crate::ShuttingDown]. Interrupts use `shards`.
     stop_event: Event,
     zero_event: Event,
-    packed: AtomicU64,
-    stopped: AtomicBool,
+    state: AtomicU64,
     swansong_count: AtomicUsize,
     /// Strong refs to every ancestor, deepest first: `[parent, grandparent, ..., root]`.
-    /// Empty for a root. Strong (not Weak) so that a guard's decrement walk always
-    /// has valid ancestors to update, even if every user-held Swansong to an
-    /// intermediate ancestor has been dropped.
+    /// Empty for a root. Strong (not Weak) so that a departure always has a valid parent to
+    /// reach, even if every user-held Swansong to an intermediate ancestor has been dropped.
     ancestors: Vec<Arc<Inner>>,
     children: Mutex<Vec<Weak<Inner>>>,
-    guard_registry: Mutex<GuardRegistry>,
-    /// The stop signal as interrupts see it, one shard per thread (modulo the length, a power of
-    /// two). Roots get [`shard::root_shard_count`] shards; children are per connection and
-    /// lightly contended, so they get one.
+    /// One shard per thread (modulo the length, a power of two), for interrupts and guards.
+    /// Roots get [`shard::root_shard_count`] shards; children are per connection and lightly
+    /// contended, so they get one.
     shards: Box<[Arc<Shard>]>,
+    /// How many times the zero event has been notified, for the loom models.
+    #[cfg(swansong_loom)]
+    zero_notifications: AtomicUsize,
 }
 
 impl Inner {
     fn new(this: &Weak<Self>, ancestors: Vec<Arc<Self>>, shard_count: usize) -> Self {
         debug_assert!(shard_count.is_power_of_two());
+        let root = ancestors.is_empty();
         Self {
             stop_event: Event::new(),
             zero_event: Event::new(),
-            packed: AtomicU64::new(0),
-            stopped: AtomicBool::new(false),
+            state: AtomicU64::new(0),
             swansong_count: AtomicUsize::new(1),
             ancestors,
             children: Mutex::default(),
-            guard_registry: Mutex::default(),
             shards: (0..shard_count)
-                .map(|_| Arc::new(Shard::new(Weak::clone(this))))
+                .map(|_| Arc::new(Shard::new(Weak::clone(this), root)))
                 .collect(),
+            #[cfg(swansong_loom)]
+            zero_notifications: AtomicUsize::new(0),
         }
     }
 
@@ -109,19 +78,19 @@ impl Inner {
     }
 
     pub(crate) fn is_stopped(&self) -> bool {
-        self.stopped.load(Ordering::SeqCst)
+        self.state.load(Ordering::SeqCst) & STOPPED != 0
     }
 
     pub(crate) fn is_stopped_relaxed(&self) -> bool {
-        self.stopped.load(Ordering::Relaxed)
+        self.state.load(Ordering::Relaxed) & STOPPED != 0
     }
 
     pub(crate) fn is_zero(&self) -> bool {
-        self.packed.load(Ordering::SeqCst) == 0
+        self.state.load(Ordering::SeqCst) & SHARDS_MASK == 0
     }
 
     pub(crate) fn is_zero_relaxed(&self) -> bool {
-        self.packed.load(Ordering::Relaxed) == 0
+        self.state.load(Ordering::Relaxed) & SHARDS_MASK == 0
     }
 
     pub(crate) fn is_complete(&self) -> bool {
@@ -140,11 +109,26 @@ impl Inner {
         self.stop_event.listen()
     }
 
+    fn notify_zero(&self) {
+        #[cfg(swansong_loom)]
+        self.zero_notifications.fetch_add(1, Ordering::SeqCst);
+        self.zero_event.notify(usize::MAX.relaxed());
+    }
+
+    #[cfg(all(test, swansong_loom))]
+    pub(crate) fn zero_notifications(&self) -> usize {
+        self.zero_notifications.load(Ordering::SeqCst)
+    }
+
+    fn shard_index(&self) -> usize {
+        shard::thread_index() & (self.shards.len() - 1)
+    }
+
     /// The calling thread's shard. An interrupt keeps the shard of the thread that created it,
     /// which is almost always the thread that polls it; one created on a spawner thread
     /// registers on the spawner's shard, contending there once per registration and drop.
     pub(crate) fn shard(&self) -> &Arc<Shard> {
-        &self.shards[shard::thread_index() & (self.shards.len() - 1)]
+        &self.shards[self.shard_index()]
     }
 
     #[cfg(all(test, swansong_loom))]
@@ -164,14 +148,15 @@ impl Inner {
     pub(crate) fn stop(&self) {
         log::trace!("intending to stop");
 
-        if self.stopped.swap(true, Ordering::SeqCst) {
+        let previous = self.state.fetch_or(STOPPED, Ordering::SeqCst);
+        if previous & STOPPED != 0 {
             log::trace!("was already stopped");
             return;
         }
 
         log::trace!("stopped");
         for shard in &self.shards {
-            shard.stop();
+            shard.stop(self);
         }
         self.stop_event.notify(usize::MAX.relaxed());
 
@@ -185,57 +170,89 @@ impl Inner {
             child.stop();
         }
 
-        if self.is_zero() {
-            self.zero_event.notify(usize::MAX.relaxed());
+        // Empty when stopped. Otherwise the departure that empties the node will see the stop.
+        if previous & SHARDS_MASK == 0 {
+            self.notify_zero();
         }
     }
 
-    /// Called by `Guard::new`. Records the guard's provenance, increments this
-    /// node's local guard count and, if the subset transitioned from empty to
-    /// nonempty, propagates the transition up the ancestor chain.
-    pub(crate) fn increment_guard(&self, info: Weak<GuardInfo>) {
-        self.guard_registry.lock().unwrap().register(info);
-        let prev = self.packed.fetch_add(LOCAL_ONE, Ordering::SeqCst);
-        log::trace!("incremented local: {prev:#x} -> {:#x}", prev + LOCAL_ONE);
-        if prev == 0 {
-            for ancestor in &self.ancestors {
-                let prev = ancestor.packed.fetch_add(KIDS_ONE, Ordering::SeqCst);
-                if prev != 0 {
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Called by `Guard::drop`. Decrements this node's local guard count and, if the
-    /// subset transitioned from nonempty to empty, notifies this node's zero event
-    /// (if stopped) and propagates the transition up the ancestor chain.
-    pub(crate) fn decrement_guard(&self) {
-        let prev = self.packed.fetch_sub(LOCAL_ONE, Ordering::SeqCst);
-        let new = prev - LOCAL_ONE;
-        log::trace!("decremented local: {prev:#x} -> {new:#x}");
-        if new == 0 {
-            if self.is_stopped() {
-                self.zero_event.notify(usize::MAX.relaxed());
-            }
-            for ancestor in &self.ancestors {
-                let prev = ancestor.packed.fetch_sub(KIDS_ONE, Ordering::SeqCst);
-                let new = prev - KIDS_ONE;
-                if new == 0 {
-                    if ancestor.is_stopped() {
-                        ancestor.zero_event.notify(usize::MAX.relaxed());
+    /// One of this node's shards arrived. Count it, first arriving at a parent shard if this
+    /// node hasn't.
+    pub(crate) fn arrive(&self) {
+        let Some(parent) = self.ancestors.first() else {
+            self.state.fetch_add(1, Ordering::SeqCst);
+            return;
+        };
+        let mut state = self.state.load(Ordering::SeqCst);
+        loop {
+            if state & ARRIVED == 0 {
+                debug_assert_eq!(state & !STOPPED, 0, "an unarrived child is empty");
+                let index = parent.shard_index();
+                let shard = &parent.shards[index];
+                shard.arrive(KIDS_ONE, parent);
+                let arrived = state | ARRIVED | (index as u64) << PARENT_SHARD_SHIFT | 1;
+                match self.state.compare_exchange(
+                    state,
+                    arrived,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => return,
+                    Err(actual) => {
+                        // Another arrival won; take ours back.
+                        if shard.depart(KIDS_ONE) {
+                            shard.flush(parent);
+                        }
+                        state = actual;
                     }
-                } else {
-                    break;
+                }
+            } else {
+                match self.state.compare_exchange_weak(
+                    state,
+                    state + 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => return,
+                    Err(actual) => state = actual,
                 }
             }
         }
     }
 
-    /// O(subtree) walk summing real guards across self and all live descendants.
+    /// One of this node's shards departed. Uncount it; if that empties the subset, notify
+    /// completions (once stopped) and depart from the parent shard.
+    pub(crate) fn depart(&self) {
+        let state = self.state.fetch_sub(1, Ordering::SeqCst) - 1;
+        log::trace!("departed: {:#x} -> {state:#x}", state + 1);
+        if state & SHARDS_MASK != 0 {
+            return;
+        }
+        if state & STOPPED != 0 {
+            self.notify_zero();
+        }
+        let Some(parent) = self.ancestors.first() else {
+            return;
+        };
+        debug_assert!(state & ARRIVED != 0, "a counted child has arrived");
+        // Fails if a shard arrived again in the meantime, which keeps this arrival.
+        if self
+            .state
+            .compare_exchange(state, state & STOPPED, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let index = usize::try_from((state >> PARENT_SHARD_SHIFT) & PARENT_SHARD_MASK)
+                .expect("shard index fits in usize");
+            let shard = &parent.shards[index];
+            if shard.depart(KIDS_ONE) {
+                shard.flush(parent);
+            }
+        }
+    }
+
+    /// O(shards + subtree) walk summing real guards across self and all live descendants.
     pub(crate) fn guard_count_subtree(&self) -> usize {
-        let local = usize::try_from(self.packed.load(Ordering::Relaxed) & LOCAL_MASK)
-            .expect("local_guards fits in usize");
+        let local: usize = self.shards.iter().map(|shard| shard.guard_count()).sum();
         let children_sum: usize = self
             .children
             .lock()
@@ -247,13 +264,11 @@ impl Inner {
         local + children_sum
     }
 
-    /// O(subtree) walk collecting provenance records for all live guards in
+    /// O(shards + subtree) walk collecting provenance records for all live guards in
     /// self and all live descendants.
     pub(crate) fn guard_infos_subtree(&self, out: &mut Vec<Arc<GuardInfo>>) {
-        {
-            let mut registry = self.guard_registry.lock().unwrap();
-            registry.sweep();
-            out.extend(registry.live());
+        for shard in &self.shards {
+            shard.guard_infos(out);
         }
         let children: Vec<Arc<Inner>> = {
             let children = self.children.lock().unwrap();
@@ -266,43 +281,12 @@ impl Inner {
 }
 
 /// A collected node can never be stopped, so its interrupts go terminal instead (`spec.md`
-/// §5.8). They hold its shards, not the node, so latch the shards, waking any that are pending.
+/// §5.8). They hold its shards, not the node, so latch the shards, waking any that are pending,
+/// and flush them so that a child stops counting toward its parent.
 impl Drop for Inner {
     fn drop(&mut self) {
         for shard in &self.shards {
-            shard.stop();
+            shard.stop(self);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::panic::Location;
-
-    #[test]
-    fn registry_memory_stays_bounded_without_reads() {
-        let mut registry = GuardRegistry::default();
-        for _ in 0..1000 {
-            let info = GuardInfo::new(Location::caller());
-            registry.register(Arc::downgrade(&info));
-            drop(info);
-        }
-        assert!(registry.guards.len() <= GuardRegistry::MIN_SWEEP_THRESHOLD);
-    }
-
-    #[test]
-    fn registry_tracks_live_guards() {
-        let mut registry = GuardRegistry::default();
-        let infos: Vec<_> = (0..100)
-            .map(|_| {
-                let info = GuardInfo::new(Location::caller());
-                registry.register(Arc::downgrade(&info));
-                info
-            })
-            .collect();
-        assert_eq!(registry.live().count(), 100);
-        drop(infos);
-        assert_eq!(registry.live().count(), 0);
     }
 }

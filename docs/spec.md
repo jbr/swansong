@@ -142,8 +142,10 @@ or member**.
 
 Per-node state lives in `Arc<Inner>` containing:
 
-- `stopped: AtomicBool` — the stop latch.
-- `local_guards: AtomicUsize` — Guards held directly in this subset.
+- `state: AtomicU64` — the stop latch, and how many of the node's shards
+  are nonempty (see Section 8).
+- `shards` — one per thread for a root, one for a child. Each counts the
+  Guards created on it and serves Interrupts (below).
 - `stop_event: Event` — notified on the stopped=false→true transition.
 - `zero_event: Event` — notified when the subset's completion condition
   holds while stopped.
@@ -152,12 +154,15 @@ All critical atomic operations use SeqCst ordering — the implementation
 prioritizes correctness over the marginal throughput of weaker orderings.
 
 The `event-listener` crate provides async and blocking waits on the two
-events, for `ShuttingDown` and `ShutdownCompletion`. Interrupts use the
-node's shards instead (below). A `Listener` is registered *before* a second check of the
-condition, to close the race where the condition becomes true between
-first check and registration.
+events, for `ShuttingDown` and `ShutdownCompletion`; Interrupts use the
+node's shards instead (below). A `Listener` is registered *before* a
+second check of the condition, to close the race where the condition
+becomes true between first check and registration.
 
-- **Guards hold `Arc<Inner>`** to their originating node (see 3.4).
+- **Guards hold the shard that counts them**, the creating thread's shard
+  of their originating node. A child's Guards also hold its `Inner` (see
+  3.4); a root's don't need to, since nothing can observe a collected
+  root.
 - **Interrupts hold one shard of the node's stop signal**, not the
   `Inner`, so that user handles govern lifetime. A root has one shard per
   thread (up to its available parallelism); a child has one. Each shard is
@@ -254,7 +259,8 @@ A Swansong is not work; it is a name for a subset. Consequences:
   ancestor chain (see 8): descendants hold strong references to every
   ancestor so that a Guard's upward accounting walk always finds a valid
   chain, even if every user-visible handle to an intermediate ancestor
-  has been dropped.
+  has been dropped. A root's own Guards are the exception: nothing can
+  observe a collected root, so they keep only their shards alive.
 - Equivalently: a node is collectible once no part of its subtree is
   alive — no Swansong clones anywhere in the subtree, no Guards in the
   subset, no pending ShutdownCompletion on this node. This is a stronger
@@ -373,94 +379,112 @@ the spec — any change must preserve Sections 3–5.
 
 **Per-node state layout.** Each `Inner` holds:
 
-- `stopped: AtomicBool`
-- `local_guards: AtomicUsize` — Guards directly on this node.
-- `nonempty_kids: AtomicUsize` — number of direct children whose subtree
-  currently contains at least one Guard.
+- `state: AtomicU64` — a stop bit; the number of the node's shards that
+  have arrived (are counted); and, for a child, whether the node has
+  arrived at a parent shard and which one.
 - `swansong_count: AtomicUsize` — number of live `Swansong` clones of
   this node.
 - `stop_event: Event`, `zero_event: Event` — wake-ups.
-- `parent: Option<Weak<Inner>>` — absent for a root, Weak for a child.
-- `ancestors: Arc<[Weak<Inner>]>` — flat chain captured at `child()`
-  time, empty for a root. Used by Guards to walk upward without a
-  per-level lock.
-- `shards: Box<[Arc<Shard>]>` — the stop signal as Interrupts see it; see
-  **Interrupt** below.
+- `ancestors: Vec<Arc<Inner>>` — strong refs to every ancestor, deepest
+  first, captured at `child()` time; empty for a root. `ancestors[0]` is
+  the parent.
+- `shards: Box<[Arc<Shard>]>` — one per thread (the available
+  parallelism, rounded up to a power of two) for a root, one for a child.
 - `children: Mutex<Vec<Weak<Inner>>>` — for downward propagation only.
   Touched by `shut_down()` and `child()`; never by Guard ops.
 
-The subset's "nonempty" predicate is `local_guards > 0 ||
-nonempty_kids > 0`. This is the structural fact that transitions propagate
-upward.
+A `Shard` is a cache-line-aligned `{ state: AtomicU64, waiters:
+Mutex<slab of Waker>, registry: Mutex<GuardRegistry>, node: Weak<Inner> }`.
+Its `state` counts the Guards created on it and the child nodes that
+arrived at it, with a stop bit and an arrived bit.
 
-**Guard.** A `Guard` holds `Arc<Inner>` to its home node. `Guard::new`
-performs `fetch_add(1, SeqCst)` on `local_guards`; if this is the
-empty→nonempty transition (prev packed value was zero), it walks
-`ancestors`, `fetch_add(1, SeqCst)` on each ancestor's `nonempty_kids`,
-stopping when an ancestor was already nonempty. `Guard::drop` is the
-symmetric operation, with a `zero_event` notification on any ancestor
-that transitions to empty while stopped.
+**Guard counting.** Counts form a tree: Guards and nonempty children count
+on a shard, a node counts its arrived shards, and a nonempty child node
+arrives at a shard of its parent (the shard of the thread that made it
+nonempty, recorded in its `state` so that it departs from the same one).
+The subset is nonempty iff the node's count is nonzero.
 
-The empty/nonempty check is made race-free by packing `local_guards`
-(low half) and `nonempty_kids` (high half) into a single `AtomicU64`
-and deriving the "nonempty" boolean from the entire 64-bit value
-atomically. The thread that causes the packed value to cross
-zero/nonzero is responsible for the upward walk; exactly one thread
-wins each crossing.
+Each level *arrives* at the one above before its first count becomes
+visible: a shard that isn't arrived first arrives at its node, then sets
+its count and arrived bit with one CAS (taking the node arrival back if
+the CAS loses to another arrival); a child node does the same with its
+parent shard. A later Guard that finds the shard arrived only increments
+it, and relies on an arrival that has completed. So while a Guard exists,
+every ancestor counts its subset as nonempty. (0.3.6 propagated after
+incrementing instead, so a second Guard could return before the first had
+made the subset visible to its ancestors; see `invariants.md` §6.)
+
+While its node runs, a shard stays arrived when its count reaches zero,
+so steady-state Guard traffic touches only the shard. Stop and the
+`Inner`'s drop set every shard's stop bit and *flush* the empty ones (a
+CAS from arrived-and-empty to departed, then a departure from the node);
+after that a shard departs as soon as it empties. A node departs from its
+parent shard as soon as its count reaches zero, notifying `zero_event` if
+it has stopped. Because a stop bit shares its word with the count it
+guards, a stop and a departure that race are read-modify-writes of one
+location, and one of them sees the shard (or node) empty and stopped.
+
+**Guard.** A `Guard` holds `Arc<Shard>` and its provenance record; a
+child's Guard also holds the child's `Inner` (3.4). `Guard::new` registers
+the provenance record on the shard's registry, then arrives. `Guard::drop`
+decrements the shard, and flushes it if that left it empty after stop.
+`Guard::clone` increments the original's shard, which the original keeps
+nonempty.
 
 **Interrupt.** `Interrupt` holds `Arc<Shard>`, the creating thread's
-shard of its node, where a `Shard` is a cache-line-aligned
-`{ stopped: AtomicBool, waiters: Mutex<slab of Waker>, node: Weak<Inner> }`.
-Poll loads the shard's `stopped` (`Relaxed`) and returns terminal if set;
-otherwise it delegates. If the wrapped value returns Pending, the
-Interrupt registers its waker: it locks the shard, re-checks `stopped`
-(terminal if set), and inserts the waker, keeping a clone so that later
-polls from the same task skip the lock. Dropping the Interrupt removes
-the registration. I/O and Iterator Interrupts only load the flag. Stop
-(and `Inner`'s drop) sets every shard's flag, then locks it and wakes
-everything registered; because registration re-checks the flag under
-that lock, a registration either precedes the drain or sees the stop
-(`invariants.md` §3). `Interrupt::guarded` and `Eq` go through
-`shard.node`.
+shard of its node. Poll loads the shard's stop bit (`Relaxed`) and
+returns terminal if set; otherwise it delegates. If the wrapped value
+returns Pending, the Interrupt registers its waker: it locks the shard's
+waiters, re-checks the stop bit (terminal if set), and inserts the waker,
+keeping a clone so that later polls from the same task skip the lock.
+Dropping the Interrupt removes the registration. I/O and Iterator
+Interrupts only load the bit. Stop (and `Inner`'s drop) sets every
+shard's stop bit, then locks its waiters and wakes everything registered;
+because registration re-checks the bit under that lock, a registration
+either precedes the drain or sees the stop (`invariants.md` §3).
+`Interrupt::guarded` and `Eq` go through `shard.node`; on an arrived root
+shard, `Interrupt::guarded` counts the Guard without touching the node.
 
-**ShutdownCompletion.** Holds `Arc<Inner>`. Polls `stopped && packed
-value == 0`; if not ready, registers on `zero_event` (and `stop_event`
-if not yet stopped), rechecks, sleeps.
+**ShutdownCompletion.** Holds `Arc<Inner>`. Polls the node's `state`
+(stopped and no arrived shards); if not ready, registers on `zero_event`,
+rechecks, sleeps.
 
-**`Swansong::shut_down()`** swaps `stopped` to true, latches and drains
-the shards, notifies `stop_event`, acquires the `children` mutex, walks the live children
-via `Weak::upgrade`, recursively calls `stop()` on each. The mutex is a
-cold-path lock; guard operations never take it.
+**`Swansong::shut_down()`** sets the stop bit, latches, drains and
+flushes the shards, notifies `stop_event`, acquires the `children` mutex,
+walks the live children via `Weak::upgrade`, and recursively calls
+`stop()` on each. The mutex is a cold-path lock; guard operations never
+take it.
 
-**`Swansong::child()`** allocates a new `Inner` with
-`parent: Some(Weak(self))` and `ancestors` set to `self.ancestors
-++ Weak(self)`. Inserts a `Weak` into `self.children` under the mutex
-(performing opportunistic eviction of dead Weaks). Seeds `stopped =
-true` under the same lock if `self` is already stopped.
+**`Swansong::child()`** allocates a new `Inner` with `ancestors` set to
+`self ++ self.ancestors`. Inserts a `Weak` into `self.children` under the
+mutex (performing opportunistic eviction of dead Weaks), then stops the
+child if `self` is already stopped.
 
 **`Swansong::drop`** decrements `swansong_count`; if the count reaches
-zero AND `parent.is_none()` (root), calls `stop()`. For child nodes, no
-action beyond the decrement.
+zero AND the node is a root, calls `stop()`. For child nodes, no action
+beyond the decrement.
 
 **Cost model.**
-- Guard create/drop: 1 atomic RMW in the steady state, up to O(depth)
-  RMWs on genuine empty↔nonempty transitions.
+- Guard create/drop: a CAS and a decrement on the creating thread's
+  shard, plus the provenance record (an allocation, a clock read and the
+  shard's registry lock). A shard arrives at its node, and a child at its
+  parent, only when first used, and again after a stop.
+- Child Guard create/drop: also the child's `Inner` refcount.
 - Interrupt poll: 1 `Relaxed` load of the shard's flag; the first Pending
   poll and the drop each also take the shard's (uncontended) lock.
-- `guard_count()`: O(subtree size) walk summing `local_guards`.
+- `guard_count()`: O(shards + subtree size) walk summing shard counts.
 - `shut_down()`: O(subtree size) propagation.
 - `child()`: O(live children of parent) for eviction + mutex acquire.
 
 **Arc/Weak summary.**
 - Swansong → Arc<Inner>
-- Guard → Arc<Inner> (home node)
+- Guard → Arc<Shard>, plus Arc<Inner> for a child's Guard
 - ShutdownCompletion → Arc<Inner>
 - Interrupt → Arc<Shard> (one shard of its node)
 - Inner → Arc<Shard> (all of its shards); Shard → Weak<Inner>
-- parent → Weak<parent_Inner>
-- ancestors → flat Weak<Inner> list
+- ancestors → Vec<Arc<Inner>>
 - children → Vec<Weak<child_Inner>>
 
-No cycles. A node is kept alive by its own Swansong clones, Guards in
-its subset, or pending ShutdownCompletions. It is not kept alive by
-descendants or ancestors.
+No cycles. A node is kept alive by its own Swansong clones, its pending
+ShutdownCompletions, its live descendants and, for a child, Guards whose
+home it is (5.5). It is not kept alive by its ancestors.

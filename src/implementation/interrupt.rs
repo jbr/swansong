@@ -59,8 +59,8 @@ impl<T> Interrupt<T> {
     #[must_use]
     #[track_caller]
     pub fn guarded(mut self) -> Self {
-        if let Some(inner) = self.stop_listener.node() {
-            self.guard = Some(Guard::new(&inner));
+        if let Some(guard) = Guard::for_shard(self.stop_listener.shard()) {
+            self.guard = Some(guard);
         }
         self
     }
