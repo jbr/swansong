@@ -1,4 +1,7 @@
-use super::guard::GuardInfo;
+use super::{
+    guard::GuardInfo,
+    shard::{self, Shard},
+};
 use event_listener::{Event, EventListener, IntoNotification};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -43,8 +46,9 @@ const LOCAL_ONE: u64 = 1;
 const KIDS_ONE: u64 = 1 << 32;
 const LOCAL_MASK: u64 = 0xFFFF_FFFF;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Inner {
+    /// Notified at stop, for [`ShuttingDown`][crate::ShuttingDown]. Interrupts use `shards`.
     stop_event: Event,
     zero_event: Event,
     packed: AtomicU64,
@@ -57,14 +61,32 @@ pub(crate) struct Inner {
     ancestors: Vec<Arc<Inner>>,
     children: Mutex<Vec<Weak<Inner>>>,
     guard_registry: Mutex<GuardRegistry>,
+    /// The stop signal as interrupts see it, one shard per thread (modulo the length, a power of
+    /// two). Roots get [`shard::root_shard_count`] shards; children are per connection and
+    /// lightly contended, so they get one.
+    shards: Box<[Arc<Shard>]>,
 }
 
 impl Inner {
-    pub(crate) fn new_root() -> Arc<Self> {
-        Arc::new(Self {
+    fn new(this: &Weak<Self>, ancestors: Vec<Arc<Self>>, shard_count: usize) -> Self {
+        debug_assert!(shard_count.is_power_of_two());
+        Self {
+            stop_event: Event::new(),
+            zero_event: Event::new(),
+            packed: AtomicU64::new(0),
+            stopped: AtomicBool::new(false),
             swansong_count: AtomicUsize::new(1),
-            ..Self::default()
-        })
+            ancestors,
+            children: Mutex::default(),
+            guard_registry: Mutex::default(),
+            shards: (0..shard_count)
+                .map(|_| Arc::new(Shard::new(Weak::clone(this))))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn new_root() -> Arc<Self> {
+        Arc::new_cyclic(|this| Self::new(this, Vec::new(), shard::root_shard_count()))
     }
 
     pub(crate) fn new_child(parent: &Arc<Self>) -> Arc<Self> {
@@ -72,11 +94,7 @@ impl Inner {
         ancestors.push(Arc::clone(parent));
         ancestors.extend(parent.ancestors.iter().cloned());
 
-        let inner = Arc::new(Self {
-            swansong_count: AtomicUsize::new(1),
-            ancestors,
-            ..Self::default()
-        });
+        let inner = Arc::new_cyclic(|this| Self::new(this, ancestors, 1));
         parent.add_child(Arc::downgrade(&inner));
         if parent.is_stopped() {
             inner.stop();
@@ -122,6 +140,18 @@ impl Inner {
         self.stop_event.listen()
     }
 
+    /// The calling thread's shard. An interrupt keeps the shard of the thread that created it,
+    /// which is almost always the thread that polls it; one created on a spawner thread
+    /// registers on the spawner's shard, contending there once per registration and drop.
+    pub(crate) fn shard(&self) -> &Arc<Shard> {
+        &self.shards[shard::thread_index() & (self.shards.len() - 1)]
+    }
+
+    #[cfg(all(test, swansong_loom))]
+    pub(crate) fn shards(&self) -> &[Arc<Shard>] {
+        &self.shards
+    }
+
     pub(crate) fn swansong_clone(&self) {
         self.swansong_count.fetch_add(1, Ordering::SeqCst);
     }
@@ -140,6 +170,9 @@ impl Inner {
         }
 
         log::trace!("stopped");
+        for shard in &self.shards {
+            shard.stop();
+        }
         self.stop_event.notify(usize::MAX.relaxed());
 
         // Snapshot children under the lock, then release before recursing to avoid
@@ -228,6 +261,16 @@ impl Inner {
         };
         for child in children {
             child.guard_infos_subtree(out);
+        }
+    }
+}
+
+/// A collected node can never be stopped, so its interrupts go terminal instead (`spec.md`
+/// §5.8). They hold its shards, not the node, so latch the shards, waking any that are pending.
+impl Drop for Inner {
+    fn drop(&mut self) {
+        for shard in &self.shards {
+            shard.stop();
         }
     }
 }

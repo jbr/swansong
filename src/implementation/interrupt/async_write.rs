@@ -8,7 +8,7 @@ use std::{
 #[cfg(feature = "futures-io")]
 impl<T: futures_io::AsyncWrite> futures_io::AsyncWrite for Interrupt<T> {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
-        if self.is_stopped_relaxed() {
+        if self.is_stopped() {
             Poll::Ready(Ok(0))
         } else {
             self.project().wrapped_type.poll_write(cx, buf)
@@ -28,7 +28,7 @@ impl<T: futures_io::AsyncWrite> futures_io::AsyncWrite for Interrupt<T> {
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<Result<usize>> {
-        if self.is_stopped_relaxed() {
+        if self.is_stopped() {
             Poll::Ready(Ok(0))
         } else {
             self.project().wrapped_type.poll_write_vectored(cx, bufs)
@@ -39,7 +39,7 @@ impl<T: futures_io::AsyncWrite> futures_io::AsyncWrite for Interrupt<T> {
 #[cfg(feature = "tokio")]
 impl<T: tokio::io::AsyncWrite> tokio::io::AsyncWrite for Interrupt<T> {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
-        if self.is_stopped_relaxed() {
+        if self.is_stopped() {
             Poll::Ready(Ok(0))
         } else {
             self.project().wrapped_type.poll_write(cx, buf)
@@ -59,7 +59,7 @@ impl<T: tokio::io::AsyncWrite> tokio::io::AsyncWrite for Interrupt<T> {
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<Result<usize>> {
-        if self.is_stopped_relaxed() {
+        if self.is_stopped() {
             Poll::Ready(Ok(0))
         } else {
             self.project().wrapped_type.poll_write_vectored(cx, bufs)

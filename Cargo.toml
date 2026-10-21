@@ -29,6 +29,15 @@ test-harness = "0.3.1"
 tokio = { version = "1.50.0", features = ["rt", "rt-multi-thread", "time"] }
 tokio-stream = { version = "0.1.18", features = ["time"] }
 
+# Loom models of the shard protocol, in src/implementation/shard.rs. A crate-specific cfg rather
+# than `loom`, which would also switch on dependencies' loom code paths. Run with
+# RUSTFLAGS="--cfg swansong_loom" cargo test --lib --release
+[target.'cfg(swansong_loom)'.dev-dependencies]
+loom = "0.7.2"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(swansong_loom)"] }
+
 [[bench]]
 name = "scaling"
 harness = false

@@ -7,6 +7,8 @@ pub use shutting_down::ShuttingDown;
 mod inner;
 pub(crate) use inner::Inner;
 
+mod shard;
+
 mod guard;
 pub use guard::Guard;
 
