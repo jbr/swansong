@@ -1,41 +1,23 @@
 use super::Interrupt;
 use futures_core::Stream;
 use std::{
-    future::Future,
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll},
 };
 
 impl<T: Stream> Stream for Interrupt<T> {
     type Item = T::Item;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut this = self.project();
-        loop {
-            if this.inner.is_stopped_relaxed() {
-                log::trace!("stopped, cancelling");
-                return Poll::Ready(None);
-            }
+        let this = self.project();
+        if this.stop_listener.is_stopped() {
+            log::trace!("stopped, cancelling");
+            return Poll::Ready(None);
+        }
 
-            let Some(listener) = this.stop_listener.listen(this.inner) else {
-                return Poll::Ready(None);
-            };
-
-            match this.wrapped_type.as_mut().poll_next(cx) {
-                Poll::Ready(item) => {
-                    return Poll::Ready(item);
-                }
-
-                Poll::Pending => {
-                    if this.inner.is_stopped_relaxed() {
-                        log::trace!("stopped, cancelling");
-                        return Poll::Ready(None);
-                    }
-
-                    ready!(Pin::new(listener).poll(cx));
-                    **this.stop_listener = None;
-                }
-            }
+        match this.wrapped_type.poll_next(cx) {
+            Poll::Ready(item) => Poll::Ready(item),
+            Poll::Pending => this.stop_listener.poll_stopped(cx).map(|()| None),
         }
     }
 

@@ -128,8 +128,11 @@ correctness depends on its accounting reaching them.
   awaited afterward will eventually resolve (modulo the guard discipline).
 - **Liveness.** If every Guard is eventually dropped and every Interrupt
   is eventually polled, `shut_down().await` terminates.
-- **Hot paths are lock-free.** Guard create/drop, Interrupt poll/read, and
-  stop-signal observation must not take a Mutex on the critical path.
+- **Hot paths do not contend.** Guard create/drop, Interrupt poll/read, and
+  stop-signal observation must not write memory that other threads also
+  write in steady state. `invariants.md` §5 is the full cost contract.
+  (An Interrupt whose wrapped value goes Pending takes an uncontended lock
+  on its own thread's shard; see Section 4.)
 
 ## 4. Single-Swansong implementation (descriptive)
 
@@ -149,15 +152,22 @@ All critical atomic operations use SeqCst ordering — the implementation
 prioritizes correctness over the marginal throughput of weaker orderings.
 
 The `event-listener` crate provides async and blocking waits on the two
-events. A `Listener` is registered *before* a second check of the
+events, for `ShuttingDown` and `ShutdownCompletion`. Interrupts use the
+node's shards instead (below). A `Listener` is registered *before* a second check of the
 condition, to close the race where the condition becomes true between
 first check and registration.
 
 - **Guards hold `Arc<Inner>`** to their originating node (see 3.4).
-- **Interrupts hold `Weak<Inner>`** so that user handles govern lifetime.
-  If `Weak::upgrade` fails, the Interrupt returns its terminal value; this
-  is how the non-hierarchical case handles an orphaned Interrupt after the
-  last Swansong is dropped.
+- **Interrupts hold one shard of the node's stop signal**, not the
+  `Inner`, so that user handles govern lifetime. A root has one shard per
+  thread (up to its available parallelism); a child has one. Each shard is
+  an `Arc` holding its own stop flag and a registry of wakers, and an
+  Interrupt uses the shard of the thread that created it. Stopping a node
+  latches and drains every shard, waking each registered Interrupt; so
+  does collecting the `Inner`, which is how an orphaned Interrupt returns
+  its terminal value after the last Swansong is dropped. An Interrupt
+  registers only once its wrapped value returns Pending, and keeps that
+  registration across polls.
 - **ShutdownCompletion holds `Arc<Inner>`** so the future or blocking call
   can resolve even if the user drops all Swansong handles.
 
@@ -294,9 +304,10 @@ A Swansong is not work; it is a name for a subset. Consequences:
   If the child's `Inner` has not been collected (e.g. a Guard or a
   pending ShutdownCompletion still pins it), the Interrupt observes the
   child's actual state — Running until parent propagates stop, then
-  terminal. If the child's `Inner` has been collected, `Weak::upgrade`
-  fails and the Interrupt returns terminal. In either case, no indefinite
-  poll results.
+  terminal. If the child's `Inner` has been collected, it latched its
+  shards as it dropped, so the Interrupt returns terminal, and a pending
+  Interrupt is woken to observe that. In either case, no indefinite poll
+  results.
 - **Recursive depth.** Arbitrary depth is supported; no hardcoded limit.
 
 ### 5.8 Child handle-drop semantics
@@ -312,7 +323,8 @@ parent.
   handle to call it).
 - If the child has no outstanding Guards or ShutdownCompletions, its
   `Inner` is collected. Any remaining Interrupts on the child observe
-  termination via `Weak::upgrade` failing.
+  termination: the collected `Inner` latches its shards, waking any that
+  are pending.
 
 This differs from the root case (Section 3.3) because a child has a
 parent to fall back to as a governing authority. The root does not, so
@@ -372,6 +384,8 @@ the spec — any change must preserve Sections 3–5.
 - `ancestors: Arc<[Weak<Inner>]>` — flat chain captured at `child()`
   time, empty for a root. Used by Guards to walk upward without a
   per-level lock.
+- `shards: Box<[Arc<Shard>]>` — the stop signal as Interrupts see it; see
+  **Interrupt** below.
 - `children: Mutex<Vec<Weak<Inner>>>` — for downward propagation only.
   Touched by `shut_down()` and `child()`; never by Guard ops.
 
@@ -394,16 +408,27 @@ atomically. The thread that causes the packed value to cross
 zero/nonzero is responsible for the upward walk; exactly one thread
 wins each crossing.
 
-**Interrupt.** `Interrupt` holds `Weak<Inner>` as today. Poll upgrades
-Weak; if it fails, returns terminal. If it succeeds, check `stopped`,
-return terminal if set; otherwise delegate.
+**Interrupt.** `Interrupt` holds `Arc<Shard>`, the creating thread's
+shard of its node, where a `Shard` is a cache-line-aligned
+`{ stopped: AtomicBool, waiters: Mutex<slab of Waker>, node: Weak<Inner> }`.
+Poll loads the shard's `stopped` (`Relaxed`) and returns terminal if set;
+otherwise it delegates. If the wrapped value returns Pending, the
+Interrupt registers its waker: it locks the shard, re-checks `stopped`
+(terminal if set), and inserts the waker, keeping a clone so that later
+polls from the same task skip the lock. Dropping the Interrupt removes
+the registration. I/O and Iterator Interrupts only load the flag. Stop
+(and `Inner`'s drop) sets every shard's flag, then locks it and wakes
+everything registered; because registration re-checks the flag under
+that lock, a registration either precedes the drain or sees the stop
+(`invariants.md` §3). `Interrupt::guarded` and `Eq` go through
+`shard.node`.
 
 **ShutdownCompletion.** Holds `Arc<Inner>`. Polls `stopped && packed
 value == 0`; if not ready, registers on `zero_event` (and `stop_event`
 if not yet stopped), rechecks, sleeps.
 
-**`Swansong::shut_down()`** swaps `stopped` to true, notifies
-`stop_event`, acquires the `children` mutex, walks the live children
+**`Swansong::shut_down()`** swaps `stopped` to true, latches and drains
+the shards, notifies `stop_event`, acquires the `children` mutex, walks the live children
 via `Weak::upgrade`, recursively calls `stop()` on each. The mutex is a
 cold-path lock; guard operations never take it.
 
@@ -420,7 +445,8 @@ action beyond the decrement.
 **Cost model.**
 - Guard create/drop: 1 atomic RMW in the steady state, up to O(depth)
   RMWs on genuine empty↔nonempty transitions.
-- Interrupt poll: 1 Weak upgrade + 1 atomic load.
+- Interrupt poll: 1 `Relaxed` load of the shard's flag; the first Pending
+  poll and the drop each also take the shard's (uncontended) lock.
 - `guard_count()`: O(subtree size) walk summing `local_guards`.
 - `shut_down()`: O(subtree size) propagation.
 - `child()`: O(live children of parent) for eviction + mutex acquire.
@@ -429,7 +455,8 @@ action beyond the decrement.
 - Swansong → Arc<Inner>
 - Guard → Arc<Inner> (home node)
 - ShutdownCompletion → Arc<Inner>
-- Interrupt → Weak<Inner>
+- Interrupt → Arc<Shard> (one shard of its node)
+- Inner → Arc<Shard> (all of its shards); Shard → Weak<Inner>
 - parent → Weak<parent_Inner>
 - ancestors → flat Weak<Inner> list
 - children → Vec<Weak<child_Inner>>

@@ -1,8 +1,8 @@
+use super::shard::StopListener;
 use crate::{Guard, Inner};
-use event_listener::EventListener;
 use std::{
     ops::{Deref, DerefMut},
-    sync::{Arc, Weak},
+    sync::Arc,
 };
 
 #[cfg(any(feature = "tokio", feature = "futures-io"))]
@@ -24,11 +24,10 @@ pin_project_lite::pin_project! {
     /// regardless of where it is being polled.
     #[derive(Debug)]
     pub struct Interrupt<T> {
-        inner: WeakInner,
+        stop_listener: StopListener,
         #[pin]
         wrapped_type: T,
         guard: Option<Guard>,
-        stop_listener: StopListener,
     }
 }
 
@@ -39,17 +38,17 @@ where
     T: PartialEq<U>,
 {
     fn eq(&self, other: &Interrupt<U>) -> bool {
-        self.inner.ptr_eq(&other.inner) && self.wrapped_type == other.wrapped_type
+        self.stop_listener.same_node(&other.stop_listener)
+            && self.wrapped_type == other.wrapped_type
     }
 }
 
 impl<T> Interrupt<T> {
-    pub(crate) fn new(inner: &Arc<Inner>, wrapped_type: T) -> Self {
+    pub(crate) fn new(inner: &Inner, wrapped_type: T) -> Self {
         Self {
-            inner: WeakInner(Arc::downgrade(inner)),
+            stop_listener: StopListener::new(Arc::clone(inner.shard())),
             wrapped_type,
             guard: None,
-            stop_listener: StopListener(None),
         }
     }
 
@@ -60,7 +59,7 @@ impl<T> Interrupt<T> {
     #[must_use]
     #[track_caller]
     pub fn guarded(mut self) -> Self {
-        if let Some(inner) = self.inner.upgrade() {
+        if let Some(inner) = self.stop_listener.node() {
             self.guard = Some(Guard::new(&inner));
         }
         self
@@ -74,12 +73,7 @@ impl<T> Interrupt<T> {
     }
 
     pub(crate) fn is_stopped(&self) -> bool {
-        self.inner.is_stopped()
-    }
-
-    #[cfg(any(feature = "futures-io", feature = "tokio"))]
-    pub(crate) fn is_stopped_relaxed(&self) -> bool {
-        self.inner.is_stopped_relaxed()
+        self.stop_listener.is_stopped()
     }
 }
 
@@ -94,57 +88,5 @@ impl<T> Deref for Interrupt<T> {
 impl<T> DerefMut for Interrupt<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.wrapped_type
-    }
-}
-
-#[derive(Debug)]
-struct WeakInner(Weak<Inner>);
-impl Deref for WeakInner {
-    type Target = Weak<Inner>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-impl WeakInner {
-    fn is_stopped(&self) -> bool {
-        self.upgrade().as_deref().is_none_or(Inner::is_stopped)
-    }
-    fn is_stopped_relaxed(&self) -> bool {
-        self.upgrade()
-            .as_deref()
-            .is_none_or(Inner::is_stopped_relaxed)
-    }
-}
-
-#[derive(Debug)]
-struct StopListener(Option<EventListener>);
-impl StopListener {
-    fn listen(&mut self, weak_inner: &WeakInner) -> Option<&mut EventListener> {
-        let Self(listener) = self;
-        if let Some(listener) = listener {
-            return Some(listener);
-        }
-        let inner = weak_inner.upgrade()?;
-        let listener = listener.insert(inner.listen_stop());
-        if inner.is_stopped() {
-            log::trace!("inner was stopped after registering new listener");
-            None
-        } else {
-            log::trace!("registered new listener");
-            Some(listener)
-        }
-    }
-}
-impl Deref for StopListener {
-    type Target = Option<EventListener>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-impl DerefMut for StopListener {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
     }
 }

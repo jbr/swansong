@@ -2,41 +2,22 @@ use super::Interrupt;
 use std::{
     future::Future,
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll},
 };
 
 impl<T: Future> Future for Interrupt<T> {
     type Output = Option<T::Output>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut this = self.project();
-        loop {
-            log::trace!("top of loop");
-            if this.inner.is_stopped_relaxed() {
-                log::trace!("stopped, cancelling");
-                return Poll::Ready(None);
-            }
+        let this = self.project();
+        if this.stop_listener.is_stopped() {
+            log::trace!("stopped, cancelling");
+            return Poll::Ready(None);
+        }
 
-            let Some(listener) = this.stop_listener.listen(this.inner) else {
-                return Poll::Ready(None);
-            };
-
-            match this.wrapped_type.as_mut().poll(cx) {
-                Poll::Ready(result) => {
-                    log::trace!("future was ready");
-                    return Poll::Ready(Some(result));
-                }
-
-                Poll::Pending => {
-                    if this.inner.is_stopped_relaxed() {
-                        log::trace!("stopped, cancelling");
-                        return Poll::Ready(None);
-                    }
-
-                    ready!(Pin::new(listener).poll(cx));
-                    **this.stop_listener = None;
-                }
-            }
+        match this.wrapped_type.poll(cx) {
+            Poll::Ready(output) => Poll::Ready(Some(output)),
+            Poll::Pending => this.stop_listener.poll_stopped(cx).map(|()| None),
         }
     }
 }
