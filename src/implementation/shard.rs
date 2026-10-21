@@ -37,6 +37,7 @@ use std::{
     cell::Cell,
     fmt::{self, Debug, Formatter},
     mem,
+    ops::Deref,
     sync::{atomic::Ordering, Arc, Weak},
     task::{Context, Poll, Waker},
 };
@@ -105,19 +106,64 @@ pub(crate) fn thread_index() -> usize {
     })
 }
 
+/// A shared handle to a shard.
+///
+/// A root's shards belong to different threads and are allocated side by side, so they are
+/// padded to keep them off each other's cache lines. A child has a single shard, used by one
+/// connection, and skips the padding: an over-aligned allocation costs a lot on some
+/// allocators, and children are created per connection.
+#[derive(Clone, Debug)]
+pub(crate) enum ShardRef {
+    Padded(Arc<CachePadded>),
+    Plain(Arc<Shard>),
+}
+
+#[derive(Debug)]
+#[repr(align(128))]
+pub(crate) struct CachePadded(Shard);
+
+impl ShardRef {
+    pub(crate) fn new(node: Weak<Inner>, root: bool) -> Self {
+        let shard = Shard::new(node, root);
+        if root {
+            Self::Padded(Arc::new(CachePadded(shard)))
+        } else {
+            Self::Plain(Arc::new(shard))
+        }
+    }
+}
+
+impl Deref for ShardRef {
+    type Target = Shard;
+
+    fn deref(&self) -> &Shard {
+        match self {
+            Self::Padded(shard) => &shard.0,
+            Self::Plain(shard) => shard,
+        }
+    }
+}
+
 /// One thread's share of a node.
 ///
 /// The shard's memory is touched only by the interrupts and guards that use it, which in steady
-/// state all belong to one thread, and by stop. The alignment keeps shards that belong to
-/// different threads off each other's cache lines.
-#[repr(align(128))]
+/// state all belong to one thread, and by stop.
 pub(crate) struct Shard {
     /// See [`LOCAL_ONE`], [`KIDS_ONE`], [`STOPPED`] and [`ARRIVED`].
     state: AtomicU64,
-    waiters: Mutex<Waiters>,
-    registry: Mutex<GuardRegistry>,
+    registered: Mutex<Registered>,
     node: Weak<Inner>,
     root: bool,
+}
+
+/// What a shard's interrupts, guards and child nodes register, under one lock: all of them
+/// belong to the shard's thread, so they don't contend.
+#[derive(Debug, Default)]
+struct Registered {
+    waiters: Slab<Waker>,
+    guards: GuardRegistry,
+    /// Children created on this shard's thread. Each removes itself when it's collected.
+    children: Slab<Weak<Inner>>,
 }
 
 impl Debug for Shard {
@@ -130,11 +176,10 @@ impl Debug for Shard {
 }
 
 impl Shard {
-    pub(crate) fn new(node: Weak<Inner>, root: bool) -> Self {
+    fn new(node: Weak<Inner>, root: bool) -> Self {
         Self {
             state: AtomicU64::new(0),
-            waiters: Mutex::new(Waiters::default()),
-            registry: Mutex::new(GuardRegistry::default()),
+            registered: Mutex::new(Registered::default()),
             node,
             root,
         }
@@ -151,8 +196,8 @@ impl Shard {
     /// the shard accepts no further registrations and its slots are never reused.
     pub(crate) fn stop(&self, node: &Inner) {
         let previous = self.state.fetch_or(STOPPED, Ordering::SeqCst);
-        let waiters = mem::take(&mut *self.waiters.lock().unwrap());
-        for waker in waiters.into_wakers() {
+        let waiters = mem::take(&mut self.registered.lock().unwrap().waiters);
+        for waker in waiters.into_values() {
             waker.wake();
         }
         // Empty when stopped. Otherwise the departure that empties it will see the stop.
@@ -245,7 +290,11 @@ impl Shard {
 
     /// Record a new guard's provenance.
     pub(crate) fn register(&self, info: &Arc<GuardInfo>) {
-        self.registry.lock().unwrap().register(Arc::downgrade(info));
+        self.registered
+            .lock()
+            .unwrap()
+            .guards
+            .register(Arc::downgrade(info));
     }
 
     pub(crate) fn guard_count(&self) -> usize {
@@ -253,10 +302,33 @@ impl Shard {
             .expect("local guard count fits in usize")
     }
 
+    /// Register a child node, returning the key to deregister it with.
+    pub(crate) fn register_child(&self, child: Weak<Inner>) -> usize {
+        self.registered.lock().unwrap().children.insert(child)
+    }
+
+    pub(crate) fn deregister_child(&self, key: usize) {
+        // A collected child's `Weak` only frees memory, but drop it outside the lock anyway.
+        let removed = self.registered.lock().unwrap().children.remove(key);
+        debug_assert!(removed.is_some(), "deregistered an unregistered child");
+        drop(removed);
+    }
+
+    /// The live children registered here. The caller drops them after the lock is released:
+    /// dropping a child's last `Arc` latches its shards and wakes its interrupts.
+    pub(crate) fn children(&self) -> Vec<Arc<Inner>> {
+        let registered = self.registered.lock().unwrap();
+        registered
+            .children
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect()
+    }
+
     pub(crate) fn guard_infos(&self, out: &mut Vec<Arc<GuardInfo>>) {
-        let mut registry = self.registry.lock().unwrap();
-        registry.sweep();
-        out.extend(registry.live());
+        let guards = &mut self.registered.lock().unwrap().guards;
+        guards.sweep();
+        out.extend(guards.live());
     }
 
     pub(crate) fn is_root(&self) -> bool {
@@ -280,7 +352,12 @@ impl Shard {
 
     #[cfg(all(test, swansong_loom))]
     pub(crate) fn waiter_count(&self) -> usize {
-        self.waiters.lock().unwrap().len()
+        self.registered.lock().unwrap().waiters.len()
+    }
+
+    #[cfg(all(test, not(swansong_loom)))]
+    pub(crate) fn child_count(&self) -> usize {
+        self.registered.lock().unwrap().children.len()
     }
 }
 
@@ -292,7 +369,7 @@ impl Shard {
 /// listener removes the registration.
 #[derive(Debug)]
 pub(crate) struct StopListener {
-    shard: Arc<Shard>,
+    shard: ShardRef,
     registration: Option<Registration>,
 }
 
@@ -305,7 +382,7 @@ struct Registration {
 }
 
 impl StopListener {
-    pub(crate) fn new(shard: Arc<Shard>) -> Self {
+    pub(crate) fn new(shard: ShardRef) -> Self {
         Self {
             shard,
             registration: None,
@@ -332,7 +409,7 @@ impl StopListener {
 
         // Clone outside the lock: cloning a waker runs executor code.
         let (ours, theirs) = (waker.clone(), waker.clone());
-        let mut waiters = self.shard.waiters.lock().unwrap();
+        let mut registered = self.shard.registered.lock().unwrap();
         if self.shard.is_stopped() {
             log::trace!("stopped before registering");
             return Poll::Ready(());
@@ -340,15 +417,15 @@ impl StopListener {
         let replaced = self
             .registration
             .as_ref()
-            .and_then(|registration| waiters.remove(registration.key));
-        let key = waiters.insert(theirs);
-        drop(waiters);
+            .and_then(|registration| registered.waiters.remove(registration.key));
+        let key = registered.waiters.insert(theirs);
+        drop(registered);
         drop(replaced);
         self.registration = Some(Registration { key, waker: ours });
         Poll::Pending
     }
 
-    pub(crate) fn shard(&self) -> &Arc<Shard> {
+    pub(crate) fn shard(&self) -> &ShardRef {
         &self.shard
     }
 
@@ -362,49 +439,59 @@ impl Drop for StopListener {
     fn drop(&mut self) {
         if let Some(Registration { key, waker }) = self.registration.take() {
             // After a drain the shard stays empty, so a drained key is simply absent.
-            let removed = self.shard.waiters.lock().unwrap().remove(key);
+            let removed = self.shard.registered.lock().unwrap().waiters.remove(key);
             drop(removed);
             drop(waker);
         }
     }
 }
 
-/// The wakers registered on a shard, in a slab keyed by registration.
-#[derive(Debug, Default)]
-struct Waiters {
-    slots: Vec<Slot>,
+/// Values under stable keys, reusing vacated keys: the wakers of a shard's registered
+/// interrupts, and its children.
+#[derive(Debug)]
+struct Slab<T> {
+    slots: Vec<Slot<T>>,
     /// Head of the free list: the index of a vacant slot, or `slots.len()` if none is vacant.
     next_vacant: usize,
 }
 
+impl<T> Default for Slab<T> {
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            next_vacant: 0,
+        }
+    }
+}
+
 #[derive(Debug)]
-enum Slot {
-    Occupied(Waker),
+enum Slot<T> {
+    Occupied(T),
     /// Vacant, linking to the next vacant slot.
     Vacant(usize),
 }
 
-impl Waiters {
-    fn insert(&mut self, waker: Waker) -> usize {
+impl<T> Slab<T> {
+    fn insert(&mut self, value: T) -> usize {
         let key = self.next_vacant;
         if let Some(slot) = self.slots.get_mut(key) {
-            let Slot::Vacant(next) = mem::replace(slot, Slot::Occupied(waker)) else {
+            let Slot::Vacant(next) = mem::replace(slot, Slot::Occupied(value)) else {
                 unreachable!("the free list only links vacant slots");
             };
             self.next_vacant = next;
         } else {
-            self.slots.push(Slot::Occupied(waker));
+            self.slots.push(Slot::Occupied(value));
             self.next_vacant = self.slots.len();
         }
         key
     }
 
-    fn remove(&mut self, key: usize) -> Option<Waker> {
+    fn remove(&mut self, key: usize) -> Option<T> {
         let slot = self.slots.get_mut(key)?;
         match mem::replace(slot, Slot::Vacant(self.next_vacant)) {
-            Slot::Occupied(waker) => {
+            Slot::Occupied(value) => {
                 self.next_vacant = key;
-                Some(waker)
+                Some(value)
             }
             vacant @ Slot::Vacant(_) => {
                 *slot = vacant;
@@ -413,9 +500,16 @@ impl Waiters {
         }
     }
 
-    fn into_wakers(self) -> impl Iterator<Item = Waker> {
+    fn values(&self) -> impl Iterator<Item = &T> {
+        self.slots.iter().filter_map(|slot| match slot {
+            Slot::Occupied(value) => Some(value),
+            Slot::Vacant(_) => None,
+        })
+    }
+
+    fn into_values(self) -> impl Iterator<Item = T> {
         self.slots.into_iter().filter_map(|slot| match slot {
-            Slot::Occupied(waker) => Some(waker),
+            Slot::Occupied(value) => Some(value),
             Slot::Vacant(_) => None,
         })
     }
@@ -434,8 +528,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn waiters_reuse_vacated_slots() {
-        let mut waiters = Waiters::default();
+    fn slab_reuses_vacated_slots() {
+        let mut waiters = Slab::default();
         let keys: Vec<_> = (0..4)
             .map(|_| waiters.insert(Waker::noop().clone()))
             .collect();
@@ -454,12 +548,12 @@ mod tests {
         assert_eq!(waiters.insert(Waker::noop().clone()), 1);
         assert_eq!(waiters.insert(Waker::noop().clone()), 4);
         assert_eq!(waiters.len(), 5);
-        assert_eq!(waiters.into_wakers().count(), 5);
+        assert_eq!(waiters.into_values().count(), 5);
     }
 
     #[test]
-    fn waiters_survive_emptying() {
-        let mut waiters = Waiters::default();
+    fn slab_survives_emptying() {
+        let mut waiters = Slab::default();
         for round in 0..3 {
             let keys: Vec<_> = (0..=round)
                 .map(|_| waiters.insert(Waker::noop().clone()))

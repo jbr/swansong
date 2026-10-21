@@ -1,5 +1,5 @@
 use super::{
-    shard::{Shard, LOCAL_ONE},
+    shard::{ShardRef, LOCAL_ONE},
     Inner,
 };
 use std::{
@@ -107,7 +107,7 @@ impl GuardRegistry {
 #[derive(Debug)]
 pub struct Guard {
     /// The shard that counts this guard: the creating thread's, or the original's for a clone.
-    shard: Arc<Shard>,
+    shard: ShardRef,
     /// A child's guard keeps the child alive (`spec.md` §3.4), so that its interrupts keep
     /// running and its departure can reach its ancestors. A root's guards don't, since that
     /// would be a shared write per guard, and nothing can observe a collected root.
@@ -127,7 +127,7 @@ impl Guard {
         shard.register(&info);
         shard.arrive(LOCAL_ONE, inner);
         Self {
-            shard: Arc::clone(shard),
+            shard: shard.clone(),
             pin: (!inner.is_root()).then(|| Arc::clone(inner)),
             info,
         }
@@ -137,12 +137,12 @@ impl Guard {
     /// shard, this needs no access to the node. Otherwise it is `None` if the node has been
     /// collected.
     #[track_caller]
-    pub(crate) fn for_shard(shard: &Arc<Shard>) -> Option<Self> {
+    pub(crate) fn for_shard(shard: &ShardRef) -> Option<Self> {
         if shard.is_root() && shard.arrive_if_arrived(LOCAL_ONE) {
             let info = GuardInfo::new(Location::caller());
             shard.register(&info);
             return Some(Self {
-                shard: Arc::clone(shard),
+                shard: shard.clone(),
                 pin: None,
                 info,
             });
@@ -183,7 +183,7 @@ impl Clone for Guard {
         self.shard.register(&info);
         self.shard.arrive_nonempty(LOCAL_ONE);
         Self {
-            shard: Arc::clone(&self.shard),
+            shard: self.shard.clone(),
             pin: self.pin.clone(),
             info,
         }

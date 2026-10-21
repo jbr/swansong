@@ -1,10 +1,27 @@
 use super::{
     guard::GuardInfo,
-    shard::{self, Shard, ARRIVED, KIDS_ONE, STOPPED},
-    sync::{AtomicU64, AtomicUsize, Mutex},
+    shard::{self, ShardRef, ARRIVED, KIDS_ONE, STOPPED},
+    sync::{AtomicU64, AtomicUsize},
 };
 use event_listener::{Event, EventListener, IntoNotification};
-use std::sync::{atomic::Ordering, Arc, Weak};
+use std::{
+    ops::Deref,
+    slice,
+    sync::{atomic::Ordering, Arc, Weak},
+};
+
+/// A child's link to its parent.
+#[derive(Debug)]
+struct Parent {
+    /// Strong (not Weak), so that every ancestor stays alive through the chain of parents and a
+    /// departure always has a valid parent to reach, even if every user-held Swansong to an
+    /// intermediate ancestor has been dropped.
+    node: Arc<Inner>,
+    /// The parent shard this child is registered on, as a child to stop.
+    shard: usize,
+    /// The child's key there, set once registered. Only drop reads it.
+    key: AtomicUsize,
+}
 
 /// `Inner::state` counts the node's arrived shards in its low 32 bits; the subset (this node and
 /// its descendants) is nonempty iff that count is. [`STOPPED`] marks a stopped node, and for a
@@ -21,60 +38,64 @@ pub(crate) struct Inner {
     zero_event: Event,
     state: AtomicU64,
     swansong_count: AtomicUsize,
-    /// Strong refs to every ancestor, deepest first: `[parent, grandparent, ..., root]`.
-    /// Empty for a root. Strong (not Weak) so that a departure always has a valid parent to
-    /// reach, even if every user-held Swansong to an intermediate ancestor has been dropped.
-    ancestors: Vec<Arc<Inner>>,
-    children: Mutex<Vec<Weak<Inner>>>,
+    /// `None` for a root.
+    parent: Option<Parent>,
     /// One shard per thread (modulo the length, a power of two), for interrupts and guards.
     /// Roots get [`shard::root_shard_count`] shards; children are per connection and lightly
     /// contended, so they get one.
-    shards: Box<[Arc<Shard>]>,
+    shards: Shards,
     /// How many times the zero event has been notified, for the loom models.
     #[cfg(swansong_loom)]
     zero_notifications: AtomicUsize,
 }
 
 impl Inner {
-    fn new(this: &Weak<Self>, ancestors: Vec<Arc<Self>>, shard_count: usize) -> Self {
+    fn new(this: &Weak<Self>, parent: Option<Parent>, shard_count: usize) -> Self {
         debug_assert!(shard_count.is_power_of_two());
-        let root = ancestors.is_empty();
+        let root = parent.is_none();
         Self {
             stop_event: Event::new(),
             zero_event: Event::new(),
             state: AtomicU64::new(0),
             swansong_count: AtomicUsize::new(1),
-            ancestors,
-            children: Mutex::default(),
-            shards: (0..shard_count)
-                .map(|_| Arc::new(Shard::new(Weak::clone(this), root)))
-                .collect(),
+            parent,
+            shards: if shard_count == 1 {
+                Shards::One(ShardRef::new(Weak::clone(this), root))
+            } else {
+                Shards::Many(
+                    (0..shard_count)
+                        .map(|_| ShardRef::new(Weak::clone(this), root))
+                        .collect(),
+                )
+            },
             #[cfg(swansong_loom)]
             zero_notifications: AtomicUsize::new(0),
         }
     }
 
     pub(crate) fn new_root() -> Arc<Self> {
-        Arc::new_cyclic(|this| Self::new(this, Vec::new(), shard::root_shard_count()))
+        Arc::new_cyclic(|this| Self::new(this, None, shard::root_shard_count()))
     }
 
     pub(crate) fn new_child(parent: &Arc<Self>) -> Arc<Self> {
-        let mut ancestors = Vec::with_capacity(parent.ancestors.len() + 1);
-        ancestors.push(Arc::clone(parent));
-        ancestors.extend(parent.ancestors.iter().cloned());
-
-        let inner = Arc::new_cyclic(|this| Self::new(this, ancestors, 1));
-        parent.add_child(Arc::downgrade(&inner));
+        let shard = parent.shard_index();
+        let link = Parent {
+            node: Arc::clone(parent),
+            shard,
+            key: AtomicUsize::new(usize::MAX),
+        };
+        let inner = Arc::new_cyclic(|this| Self::new(this, Some(link), 1));
+        // Register only once constructed: a stop that found the child unconstructed couldn't
+        // upgrade it, and nothing would order that stop before the check below. Registered, it's
+        // either in the stop's snapshot or behind it in the shard's lock order.
+        let key = parent.shards[shard].register_child(Arc::downgrade(&inner));
+        if let Some(link) = &inner.parent {
+            link.key.store(key, Ordering::Relaxed);
+        }
         if parent.is_stopped() {
             inner.stop();
         }
         inner
-    }
-
-    fn add_child(&self, child: Weak<Inner>) {
-        let mut children = self.children.lock().unwrap();
-        children.retain(|c| c.upgrade().is_some_and(|c| !c.is_complete()));
-        children.push(child);
     }
 
     pub(crate) fn is_stopped(&self) -> bool {
@@ -93,12 +114,13 @@ impl Inner {
         self.state.load(Ordering::Relaxed) & SHARDS_MASK == 0
     }
 
+    #[cfg(all(test, swansong_loom))]
     pub(crate) fn is_complete(&self) -> bool {
         self.is_stopped() && self.is_zero()
     }
 
     pub(crate) fn is_root(&self) -> bool {
-        self.ancestors.is_empty()
+        self.parent.is_none()
     }
 
     pub(crate) fn listen_zero(&self) -> EventListener {
@@ -127,12 +149,12 @@ impl Inner {
     /// The calling thread's shard. An interrupt keeps the shard of the thread that created it,
     /// which is almost always the thread that polls it; one created on a spawner thread
     /// registers on the spawner's shard, contending there once per registration and drop.
-    pub(crate) fn shard(&self) -> &Arc<Shard> {
+    pub(crate) fn shard(&self) -> &ShardRef {
         &self.shards[self.shard_index()]
     }
 
     #[cfg(all(test, swansong_loom))]
-    pub(crate) fn shards(&self) -> &[Arc<Shard>] {
+    pub(crate) fn shards(&self) -> &[ShardRef] {
         &self.shards
     }
 
@@ -155,18 +177,12 @@ impl Inner {
         }
 
         log::trace!("stopped");
-        for shard in &self.shards {
+        for shard in self.shards.iter() {
             shard.stop(self);
         }
         self.stop_event.notify(usize::MAX.relaxed());
 
-        // Snapshot children under the lock, then release before recursing to avoid
-        // holding the lock across child.stop() calls.
-        let children: Vec<Arc<Inner>> = {
-            let guard = self.children.lock().unwrap();
-            guard.iter().filter_map(Weak::upgrade).collect()
-        };
-        for child in children {
+        for child in self.live_children() {
             child.stop();
         }
 
@@ -179,7 +195,7 @@ impl Inner {
     /// One of this node's shards arrived. Count it, first arriving at a parent shard if this
     /// node hasn't.
     pub(crate) fn arrive(&self) {
-        let Some(parent) = self.ancestors.first() else {
+        let Some(Parent { node: parent, .. }) = &self.parent else {
             self.state.fetch_add(1, Ordering::SeqCst);
             return;
         };
@@ -231,7 +247,7 @@ impl Inner {
         if state & STOPPED != 0 {
             self.notify_zero();
         }
-        let Some(parent) = self.ancestors.first() else {
+        let Some(Parent { node: parent, .. }) = &self.parent else {
             return;
         };
         debug_assert!(state & ARRIVED != 0, "a counted child has arrived");
@@ -250,16 +266,21 @@ impl Inner {
         }
     }
 
+    /// The live children, registered across this node's shards.
+    fn live_children(&self) -> Vec<Arc<Inner>> {
+        self.shards
+            .iter()
+            .flat_map(|shard| shard.children())
+            .collect()
+    }
+
     /// O(shards + subtree) walk summing real guards across self and all live descendants.
     pub(crate) fn guard_count_subtree(&self) -> usize {
         let local: usize = self.shards.iter().map(|shard| shard.guard_count()).sum();
         let children_sum: usize = self
-            .children
-            .lock()
-            .unwrap()
+            .live_children()
             .iter()
-            .filter_map(Weak::upgrade)
-            .map(|c| c.guard_count_subtree())
+            .map(|child| child.guard_count_subtree())
             .sum();
         local + children_sum
     }
@@ -267,15 +288,29 @@ impl Inner {
     /// O(shards + subtree) walk collecting provenance records for all live guards in
     /// self and all live descendants.
     pub(crate) fn guard_infos_subtree(&self, out: &mut Vec<Arc<GuardInfo>>) {
-        for shard in &self.shards {
+        for shard in self.shards.iter() {
             shard.guard_infos(out);
         }
-        let children: Vec<Arc<Inner>> = {
-            let children = self.children.lock().unwrap();
-            children.iter().filter_map(Weak::upgrade).collect()
-        };
-        for child in children {
+        for child in self.live_children() {
             child.guard_infos_subtree(out);
+        }
+    }
+}
+
+/// A node's shards. A child's single shard is stored inline, saving an allocation per child.
+#[derive(Debug)]
+enum Shards {
+    One(ShardRef),
+    Many(Box<[ShardRef]>),
+}
+
+impl Deref for Shards {
+    type Target = [ShardRef];
+
+    fn deref(&self) -> &[ShardRef] {
+        match self {
+            Self::One(shard) => slice::from_ref(shard),
+            Self::Many(shards) => shards,
         }
     }
 }
@@ -285,8 +320,43 @@ impl Inner {
 /// and flush them so that a child stops counting toward its parent.
 impl Drop for Inner {
     fn drop(&mut self) {
-        for shard in &self.shards {
+        for shard in self.shards.iter() {
             shard.stop(self);
         }
+        if let Some(Parent { node, shard, key }) = &self.parent {
+            let key = key.load(Ordering::Relaxed);
+            // Unset only if registration itself failed.
+            if key != usize::MAX {
+                node.shards[*shard].deregister_child(key);
+            }
+        }
+    }
+}
+
+#[cfg(all(test, not(swansong_loom)))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn children_registered_exactly_while_alive() {
+        let root = Inner::new_root();
+        let mut live = vec![];
+        for i in 0..1000 {
+            let child = Inner::new_child(&root);
+            if i % 10 == 0 {
+                live.push(child);
+            }
+        }
+        let registered = || {
+            root.shards
+                .iter()
+                .map(|shard| shard.child_count())
+                .sum::<usize>()
+        };
+        assert_eq!(registered(), live.len());
+        assert_eq!(root.live_children().len(), live.len());
+
+        drop(live);
+        assert_eq!(registered(), 0);
     }
 }

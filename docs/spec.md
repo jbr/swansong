@@ -385,18 +385,19 @@ the spec — any change must preserve Sections 3–5.
 - `swansong_count: AtomicUsize` — number of live `Swansong` clones of
   this node.
 - `stop_event: Event`, `zero_event: Event` — wake-ups.
-- `ancestors: Vec<Arc<Inner>>` — strong refs to every ancestor, deepest
-  first, captured at `child()` time; empty for a root. `ancestors[0]` is
-  the parent.
-- `shards: Box<[Arc<Shard>]>` — one per thread (the available
-  parallelism, rounded up to a power of two) for a root, one for a child.
-- `children: Mutex<Vec<Weak<Inner>>>` — for downward propagation only.
-  Touched by `shut_down()` and `child()`; never by Guard ops.
+- `parent` — for a child, a strong ref to its parent (so every ancestor
+  stays alive through the chain of parents), the parent shard it is
+  registered on, and its key there; absent for a root.
+- `shards` — one per thread (the available parallelism, rounded up to a
+  power of two) for a root, one for a child, stored inline.
 
-A `Shard` is a cache-line-aligned `{ state: AtomicU64, waiters:
-Mutex<slab of Waker>, registry: Mutex<GuardRegistry>, node: Weak<Inner> }`.
+A `Shard` is `{ state: AtomicU64, node: Weak<Inner>, Mutex<{ waiters:
+slab of Waker, guards: GuardRegistry, children: slab of Weak<Inner> }> }`.
 Its `state` counts the Guards created on it and the child nodes that
-arrived at it, with a stop bit and an arrived bit.
+arrived at it, with a stop bit and an arrived bit. Its lock covers what its
+Interrupts, Guards and child nodes register, all from its own thread. A
+root's shards are cache-line aligned; a child's single shard isn't, which
+keeps `child()` cheap.
 
 **Guard counting.** Counts form a tree: Guards and nonempty children count
 on a shard, a node counts its arrived shards, and a nonempty child node
@@ -452,13 +453,15 @@ rechecks, sleeps.
 **`Swansong::shut_down()`** sets the stop bit, latches, drains and
 flushes the shards, notifies `stop_event`, acquires the `children` mutex,
 walks the live children via `Weak::upgrade`, and recursively calls
-`stop()` on each. The mutex is a cold-path lock; guard operations never
-take it.
+`stop()` on each.
 
-**`Swansong::child()`** allocates a new `Inner` with `ancestors` set to
-`self ++ self.ancestors`. Inserts a `Weak` into `self.children` under the
-mutex (performing opportunistic eviction of dead Weaks), then stops the
-child if `self` is already stopped.
+**`Swansong::child()`** allocates a new `Inner` holding `self` as its
+parent, then registers a `Weak` to it on the calling thread's shard of
+`self`, and stops it if `self` is already stopped. Registering after
+construction matters: a concurrent stop either finds the child in its
+snapshot of that shard or comes before the registration in the shard's
+lock order, in which case the child's check sees the stop. A collected
+child removes its registration as it drops.
 
 **`Swansong::drop`** decrements `swansong_count`; if the count reaches
 zero AND the node is a root, calls `stop()`. For child nodes, no action
@@ -474,7 +477,9 @@ beyond the decrement.
   poll and the drop each also take the shard's (uncontended) lock.
 - `guard_count()`: O(shards + subtree size) walk summing shard counts.
 - `shut_down()`: O(subtree size) propagation.
-- `child()`: O(live children of parent) for eviction + mutex acquire.
+- `child()`: O(1): two allocations (the `Inner` and its shard) and the
+  calling thread's shard lock on the parent, plus the parent's refcount.
+  Dropping a child takes the same shard lock to deregister.
 
 **Arc/Weak summary.**
 - Swansong → Arc<Inner>
@@ -482,8 +487,8 @@ beyond the decrement.
 - ShutdownCompletion → Arc<Inner>
 - Interrupt → Arc<Shard> (one shard of its node)
 - Inner → Arc<Shard> (all of its shards); Shard → Weak<Inner>
-- ancestors → Vec<Arc<Inner>>
-- children → Vec<Weak<child_Inner>>
+- parent → Arc<parent_Inner>
+- children → Weak<child_Inner>, in the parent's shards
 
 No cycles. A node is kept alive by its own Swansong clones, its pending
 ShutdownCompletions, its live descendants and, for a child, Guards whose

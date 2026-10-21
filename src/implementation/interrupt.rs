@@ -1,9 +1,6 @@
 use super::shard::StopListener;
 use crate::{Guard, Inner};
-use std::{
-    ops::{Deref, DerefMut},
-    sync::Arc,
-};
+use std::ops::{Deref, DerefMut};
 
 #[cfg(any(feature = "tokio", feature = "futures-io"))]
 mod async_read;
@@ -46,7 +43,7 @@ where
 impl<T> Interrupt<T> {
     pub(crate) fn new(inner: &Inner, wrapped_type: T) -> Self {
         Self {
-            stop_listener: StopListener::new(Arc::clone(inner.shard())),
+            stop_listener: StopListener::new(inner.shard().clone()),
             wrapped_type,
             guard: None,
         }
