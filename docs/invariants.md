@@ -109,8 +109,9 @@ The rules:
 - **H3 Flat cost.** Per-operation cost does not grow with the number of threads, live guards,
   live interrupts, or children.
 - **H4 No per-operation allocation** that doesn't amortize away (reusing slab slots is fine).
-  **Decision:** is per-guard provenance (an `Arc<GuardInfo>` plus `Instant::now()`) acceptable
-  in steady state, or should it become opt-in?
+  **Decided: opt-in.** Per-guard provenance (an `Arc<GuardInfo>` plus `Instant::now()`) was
+  about 4% of h2 cycles at 32 cores, since h2 takes a root guard per stream. It is recorded
+  only under `Swansong::with_guard_report()`; otherwise a guard keeps just its creation site.
 
 ### Warm paths
 

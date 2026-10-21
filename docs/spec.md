@@ -425,12 +425,16 @@ it has stopped. Because a stop bit shares its word with the count it
 guards, a stop and a departure that race are read-modify-writes of one
 location, and one of them sees the shard (or node) empty and stopped.
 
-**Guard.** A `Guard` holds `Arc<Shard>` and its provenance record; a
-child's Guard also holds the child's `Inner` (3.4). `Guard::new` registers
-the provenance record on the shard's registry, then arrives. `Guard::drop`
-decrements the shard, and flushes it if that left it empty after stop.
-`Guard::clone` increments the original's shard, which the original keeps
-nonempty.
+**Guard.** A `Guard` holds `Arc<Shard>` and its creation site (the
+`&'static Location` from `#[track_caller]`); a child's Guard also holds the
+child's `Inner` (3.4). Only under a root created with
+`Swansong::with_guard_report()` does it also allocate a provenance record
+(site and creation time), registered on the shard, for `guard_report()`;
+the choice is fixed at root creation and inherited by children, so the
+registry never misses a guard. `Guard::new` arrives at the shard.
+`Guard::drop` decrements the shard, and flushes it if that left it empty
+after stop. `Guard::clone` increments the original's shard, which the
+original keeps nonempty.
 
 **Interrupt.** `Interrupt` holds `Arc<Shard>`, the creating thread's
 shard of its node. Poll loads the shard's stop bit (`Relaxed`) and
@@ -469,9 +473,10 @@ beyond the decrement.
 
 **Cost model.**
 - Guard create/drop: a CAS and a decrement on the creating thread's
-  shard, plus the provenance record (an allocation, a clock read and the
-  shard's registry lock). A shard arrives at its node, and a child at its
-  parent, only when first used, and again after a stop.
+  shard; no allocation, lock or clock read. With a guard report, also the
+  provenance record (an allocation, a clock read and the shard's lock). A
+  shard arrives at its node, and a child at its parent, only when first
+  used, and again after a stop.
 - Child Guard create/drop: also the child's `Inner` refcount.
 - Interrupt poll: 1 `Relaxed` load of the shard's flag; the first Pending
   poll and the drop each also take the shard's (uncontended) lock.

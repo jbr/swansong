@@ -10,7 +10,7 @@ fn auto_traits() {
 
 #[test]
 fn report_aggregates_by_creation_site() {
-    let swansong = Swansong::new();
+    let swansong = Swansong::with_guard_report();
     assert!(swansong.guard_report().is_empty());
     assert_eq!(swansong.guard_report().guard_count(), 0);
 
@@ -48,7 +48,7 @@ fn report_aggregates_by_creation_site() {
 
 #[test]
 fn clones_inherit_creation_location() {
-    let swansong = Swansong::new();
+    let swansong = Swansong::with_guard_report();
     let original = swansong.guard();
     let original_line = line!() - 1;
     let clone = original.clone();
@@ -64,7 +64,7 @@ fn clones_inherit_creation_location() {
 
 #[test]
 fn guarded_and_interrupt_record_caller_location() {
-    let swansong = Swansong::new();
+    let swansong = Swansong::with_guard_report();
     let _guarded = swansong.guarded(std::future::pending::<()>());
     let guarded_line = line!() - 1;
     let _interrupt = swansong.interrupt(std::future::pending::<()>()).guarded();
@@ -86,7 +86,7 @@ fn guarded_and_interrupt_record_caller_location() {
 
 #[test]
 fn parent_report_includes_child_guards() {
-    let parent = Swansong::new();
+    let parent = Swansong::with_guard_report();
     let child = parent.child();
     let _child_guard = child.guard();
     let child_line = line!() - 1;
@@ -100,7 +100,7 @@ fn parent_report_includes_child_guards() {
 
 #[test]
 fn guard_outlives_child_swansong_handle() {
-    let parent = Swansong::new();
+    let parent = Swansong::with_guard_report();
     let guard = {
         let child = parent.child();
         child.guard()
@@ -117,7 +117,7 @@ fn guard_outlives_child_swansong_handle() {
 #[cfg(not(miri))]
 #[test]
 fn ages_are_reported() {
-    let swansong = Swansong::new();
+    let swansong = Swansong::with_guard_report();
     let _guard = swansong.guard();
     std::thread::sleep(std::time::Duration::from_millis(10));
     let report = swansong.guard_report();
@@ -127,7 +127,7 @@ fn ages_are_reported() {
 
 #[test]
 fn display() {
-    let swansong = Swansong::new();
+    let swansong = Swansong::with_guard_report();
     assert_eq!(swansong.guard_report().to_string(), "no outstanding guards");
 
     let _guard = swansong.guard();
@@ -139,4 +139,35 @@ fn display() {
     let _another = swansong.guard();
     let display = swansong.guard_report().to_string();
     assert!(display.starts_with("2 outstanding guards:"), "{display}");
+}
+
+#[test]
+fn default_report_only_counts() {
+    let swansong = Swansong::new();
+    assert!(swansong.guard_report().is_empty());
+    assert_eq!(swansong.guard_report().to_string(), "no outstanding guards");
+
+    let _guards = [swansong.guard(), swansong.guard()];
+    let report = swansong.guard_report();
+    assert_eq!(report.guard_count(), 2);
+    assert!(!report.is_empty());
+    assert!(report.entries().is_empty());
+    let display = report.to_string();
+    assert!(display.starts_with("2 outstanding guards"), "{display}");
+    assert!(display.contains("with_guard_report"), "{display}");
+}
+
+#[test]
+fn children_inherit_guard_report() {
+    let reporting = Swansong::with_guard_report();
+    let child = reporting.child().child();
+    let _guard = child.guard();
+    assert_eq!(child.guard_report().entries().len(), 1);
+    assert_eq!(reporting.guard_report().entries().len(), 1);
+
+    let quiet = Swansong::new();
+    let child = quiet.child();
+    let _guard = child.guard();
+    assert_eq!(quiet.guard_report().guard_count(), 1);
+    assert!(quiet.guard_report().entries().is_empty());
 }

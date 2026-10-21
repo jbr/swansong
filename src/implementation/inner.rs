@@ -50,7 +50,12 @@ pub(crate) struct Inner {
 }
 
 impl Inner {
-    fn new(this: &Weak<Self>, parent: Option<Parent>, shard_count: usize) -> Self {
+    fn new(
+        this: &Weak<Self>,
+        parent: Option<Parent>,
+        shard_count: usize,
+        guard_report: bool,
+    ) -> Self {
         debug_assert!(shard_count.is_power_of_two());
         let root = parent.is_none();
         Self {
@@ -60,11 +65,11 @@ impl Inner {
             swansong_count: AtomicUsize::new(1),
             parent,
             shards: if shard_count == 1 {
-                Shards::One(ShardRef::new(Weak::clone(this), root))
+                Shards::One(ShardRef::new(Weak::clone(this), root, guard_report))
             } else {
                 Shards::Many(
                     (0..shard_count)
-                        .map(|_| ShardRef::new(Weak::clone(this), root))
+                        .map(|_| ShardRef::new(Weak::clone(this), root, guard_report))
                         .collect(),
                 )
             },
@@ -73,8 +78,9 @@ impl Inner {
         }
     }
 
-    pub(crate) fn new_root() -> Arc<Self> {
-        Arc::new_cyclic(|this| Self::new(this, None, shard::root_shard_count()))
+    /// A root, which keeps a guard report if `guard_report`.
+    pub(crate) fn new_root(guard_report: bool) -> Arc<Self> {
+        Arc::new_cyclic(|this| Self::new(this, None, shard::root_shard_count(), guard_report))
     }
 
     pub(crate) fn new_child(parent: &Arc<Self>) -> Arc<Self> {
@@ -84,7 +90,8 @@ impl Inner {
             shard,
             key: AtomicUsize::new(usize::MAX),
         };
-        let inner = Arc::new_cyclic(|this| Self::new(this, Some(link), 1));
+        let guard_report = parent.keeps_guard_report();
+        let inner = Arc::new_cyclic(|this| Self::new(this, Some(link), 1, guard_report));
         // Register only once constructed: a stop that found the child unconstructed couldn't
         // upgrade it, and nothing would order that stop before the check below. Registered, it's
         // either in the stop's snapshot or behind it in the shard's lock order.
@@ -121,6 +128,10 @@ impl Inner {
 
     pub(crate) fn is_root(&self) -> bool {
         self.parent.is_none()
+    }
+
+    pub(crate) fn keeps_guard_report(&self) -> bool {
+        self.shards[0].keeps_guard_report()
     }
 
     pub(crate) fn listen_zero(&self) -> EventListener {
@@ -339,7 +350,7 @@ mod tests {
 
     #[test]
     fn children_registered_exactly_while_alive() {
-        let root = Inner::new_root();
+        let root = Inner::new_root(false);
         let mut live = vec![];
         for i in 0..1000 {
             let child = Inner::new_child(&root);

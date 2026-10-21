@@ -92,12 +92,14 @@ impl GuardRegistry {
 /// Each clone is treated distinctly in the guard count, and inherits the
 /// creation location of the guard it was cloned from.
 ///
-/// Each Guard records the source location it was created at (captured with
-/// `#[track_caller]`). If shutdown stalls on straggling guards,
+/// Each Guard knows the source location it was created at (captured with
+/// `#[track_caller]`), and a Guard dropped after shutdown has been initiated
+/// logs it at [`log::Level::Debug`], making it easy to watch stragglers
+/// resolve. Under a root created with
+/// [`Swansong::with_guard_report`][crate::Swansong::with_guard_report], Guards
+/// also record when they were created, and
 /// [`Swansong::guard_report`][crate::Swansong::guard_report] reports the
-/// outstanding guards by creation site. Additionally, a Guard dropped after
-/// shutdown has been initiated logs its creation site at
-/// [`log::Level::Debug`], making it easy to watch stragglers resolve.
+/// outstanding guards by creation site.
 ///
 /// A Guard keeps its originating node's coordination state alive for the Guard's
 /// lifetime, so that its drop can correctly update ancestor subtree accounting
@@ -112,7 +114,10 @@ pub struct Guard {
     /// running and its departure can reach its ancestors. A root's guards don't, since that
     /// would be a shared write per guard, and nothing can observe a collected root.
     pin: Option<Arc<Inner>>,
-    info: Arc<GuardInfo>,
+    location: &'static Location<'static>,
+    /// Kept only on a node created with
+    /// [`Swansong::with_guard_report`][crate::Swansong::with_guard_report].
+    info: Option<Arc<GuardInfo>>,
 }
 
 impl Guard {
@@ -123,12 +128,12 @@ impl Guard {
 
     fn at_location(inner: &Arc<Inner>, location: &'static Location<'static>) -> Self {
         let shard = inner.shard();
-        let info = GuardInfo::new(location);
-        shard.register(&info);
+        let info = shard.provenance(location);
         shard.arrive(LOCAL_ONE, inner);
         Self {
             shard: shard.clone(),
             pin: (!inner.is_root()).then(|| Arc::clone(inner)),
+            location,
             info,
         }
     }
@@ -139,12 +144,12 @@ impl Guard {
     #[track_caller]
     pub(crate) fn for_shard(shard: &ShardRef) -> Option<Self> {
         if shard.is_root() && shard.arrive_if_arrived(LOCAL_ONE) {
-            let info = GuardInfo::new(Location::caller());
-            shard.register(&info);
+            let location = Location::caller();
             return Some(Self {
                 shard: shard.clone(),
                 pin: None,
-                info,
+                location,
+                info: shard.provenance(location),
             });
         }
         let inner = shard.node()?;
@@ -155,16 +160,13 @@ impl Guard {
 impl Drop for Guard {
     fn drop(&mut self) {
         if self.shard.is_stopped() && log::log_enabled!(log::Level::Debug) {
-            if let Some(age) = self.info.age() {
+            if let Some(age) = self.info.as_ref().and_then(|info| info.age()) {
                 log::debug!(
                     "guard created at {} dropped during shutdown after {age:.1?}",
-                    self.info.location()
+                    self.location
                 );
             } else {
-                log::debug!(
-                    "guard created at {} dropped during shutdown",
-                    self.info.location()
-                );
+                log::debug!("guard created at {} dropped during shutdown", self.location);
             }
         }
         if self.shard.depart(LOCAL_ONE) {
@@ -179,12 +181,12 @@ impl Drop for Guard {
 
 impl Clone for Guard {
     fn clone(&self) -> Self {
-        let info = GuardInfo::new(self.info.location());
-        self.shard.register(&info);
+        let info = self.shard.provenance(self.location);
         self.shard.arrive_nonempty(LOCAL_ONE);
         Self {
             shard: self.shard.clone(),
             pin: self.pin.clone(),
+            location: self.location,
             info,
         }
     }
