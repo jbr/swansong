@@ -38,6 +38,7 @@ use std::{
     fmt::{self, Debug, Formatter},
     mem,
     ops::Deref,
+    panic::Location,
     sync::{atomic::Ordering, Arc, Weak},
     task::{Context, Poll, Waker},
 };
@@ -123,8 +124,8 @@ pub(crate) enum ShardRef {
 pub(crate) struct CachePadded(Shard);
 
 impl ShardRef {
-    pub(crate) fn new(node: Weak<Inner>, root: bool) -> Self {
-        let shard = Shard::new(node, root);
+    pub(crate) fn new(node: Weak<Inner>, root: bool, guard_report: bool) -> Self {
+        let shard = Shard::new(node, root, guard_report);
         if root {
             Self::Padded(Arc::new(CachePadded(shard)))
         } else {
@@ -154,6 +155,9 @@ pub(crate) struct Shard {
     registered: Mutex<Registered>,
     node: Weak<Inner>,
     root: bool,
+    /// Whether guards record provenance for [`Swansong::guard_report`][crate::Swansong::guard_report].
+    /// Fixed when the root is created, and inherited by its children.
+    guard_report: bool,
 }
 
 /// What a shard's interrupts, guards and child nodes register, under one lock: all of them
@@ -176,12 +180,13 @@ impl Debug for Shard {
 }
 
 impl Shard {
-    fn new(node: Weak<Inner>, root: bool) -> Self {
+    fn new(node: Weak<Inner>, root: bool, guard_report: bool) -> Self {
         Self {
             state: AtomicU64::new(0),
             registered: Mutex::new(Registered::default()),
             node,
             root,
+            guard_report,
         }
     }
 
@@ -288,13 +293,27 @@ impl Shard {
         }
     }
 
-    /// Record a new guard's provenance.
-    pub(crate) fn register(&self, info: &Arc<GuardInfo>) {
+    /// A provenance record for a new guard created at `location`, registered here, if this
+    /// node keeps a guard report. Otherwise guards record nothing: no allocation, no lock and
+    /// no clock read.
+    pub(crate) fn provenance(
+        &self,
+        location: &'static Location<'static>,
+    ) -> Option<Arc<GuardInfo>> {
+        if !self.guard_report {
+            return None;
+        }
+        let info = GuardInfo::new(location);
         self.registered
             .lock()
             .unwrap()
             .guards
-            .register(Arc::downgrade(info));
+            .register(Arc::downgrade(&info));
+        Some(info)
+    }
+
+    pub(crate) fn keeps_guard_report(&self) -> bool {
+        self.guard_report
     }
 
     pub(crate) fn guard_count(&self) -> usize {

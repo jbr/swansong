@@ -42,7 +42,7 @@ fn poll(interrupt: &mut Interrupt<Pending<()>>, waker: &Waker) -> Poll<Option<()
 #[test]
 fn register_vs_stop() {
     loom::model(|| {
-        let root = Inner::new_root();
+        let root = Inner::new_root(false);
         let mut interrupt = Interrupt::new(&root, pending());
         let (wake_count, waker) = Wakes::waker();
 
@@ -68,7 +68,7 @@ fn register_vs_stop() {
 #[test]
 fn same_waker_repoll_vs_stop() {
     loom::model(|| {
-        let root = Inner::new_root();
+        let root = Inner::new_root(false);
         let mut interrupt = Interrupt::new(&root, pending());
         let (wake_count, waker) = Wakes::waker();
         assert!(poll(&mut interrupt, &waker).is_pending());
@@ -95,7 +95,7 @@ fn same_waker_repoll_vs_stop() {
 #[test]
 fn migration_and_waker_replacement_vs_stop() {
     loom::model(|| {
-        let root = Inner::new_root();
+        let root = Inner::new_root(false);
         let mut interrupt = Interrupt::new(&root, pending());
         let (_, first_waker) = Wakes::waker();
         assert!(poll(&mut interrupt, &first_waker).is_pending());
@@ -127,7 +127,7 @@ fn migration_and_waker_replacement_vs_stop() {
 #[test]
 fn deregistration_vs_stop() {
     loom::model(|| {
-        let root = Inner::new_root();
+        let root = Inner::new_root(false);
         let mut dropped = Interrupt::new(&root, pending());
         let mut survivor = Interrupt::new(&root, pending());
         let (_, dropped_waker) = Wakes::waker();
@@ -155,7 +155,7 @@ fn deregistration_vs_stop() {
 #[test]
 fn collection_vs_pending_interrupt() {
     loom::model(|| {
-        let root = Inner::new_root();
+        let root = Inner::new_root(false);
         let child = Inner::new_child(&root);
         let mut interrupt = Interrupt::new(&child, pending());
         let (wake_count, waker) = Wakes::waker();
@@ -181,7 +181,7 @@ fn collection_vs_pending_interrupt() {
 #[test]
 fn piggybacked_guard_vs_stop() {
     loom::model(|| {
-        let root = Inner::new_root();
+        let root = Inner::new_root(false);
         let child = Inner::new_child(&root);
         let first = thread::spawn({
             let child = Arc::clone(&child);
@@ -206,7 +206,7 @@ fn piggybacked_guard_vs_stop() {
 #[test]
 fn last_guard_drop_vs_stop() {
     loom::model(|| {
-        let root = Inner::new_root();
+        let root = Inner::new_root(false);
         let guard = Guard::new(&root);
         let dropper = thread::spawn(move || drop(guard));
 
@@ -229,7 +229,7 @@ fn last_guard_drop_vs_stop() {
 #[test]
 fn child_guard_drop_vs_root_stop() {
     loom::model(|| {
-        let root = Inner::new_root();
+        let root = Inner::new_root(false);
         let guard = Guard::new(&Inner::new_child(&root));
         let dropper = thread::spawn(move || drop(guard));
 
@@ -253,7 +253,7 @@ fn child_guard_drop_vs_root_stop() {
 #[test]
 fn concurrent_first_arrivals() {
     loom::model(|| {
-        let root = Inner::new_root();
+        let root = Inner::new_root(false);
         let child = Inner::new_child(&root);
         let other = thread::spawn({
             let child = Arc::clone(&child);
@@ -279,7 +279,7 @@ fn concurrent_first_arrivals() {
 #[test]
 fn arrival_vs_flush() {
     loom::model(|| {
-        let root = Inner::new_root();
+        let root = Inner::new_root(false);
         let child = Inner::new_child(&root);
         drop(Guard::new(&child));
         let creator = thread::spawn({
@@ -303,7 +303,7 @@ fn arrival_vs_flush() {
 #[test]
 fn collection_vs_root_stop() {
     loom::model(|| {
-        let root = Inner::new_root();
+        let root = Inner::new_root(false);
         let child = Inner::new_child(&root);
         drop(Guard::new(&child));
         let collector = thread::spawn(move || drop(child));
@@ -327,7 +327,7 @@ fn collection_vs_root_stop() {
 #[test]
 fn child_creation_vs_parent_stop() {
     loom::model(|| {
-        let root = Inner::new_root();
+        let root = Inner::new_root(false);
         let creator = thread::spawn({
             let root = Arc::clone(&root);
             move || Inner::new_child(&root)
@@ -343,7 +343,7 @@ fn child_creation_vs_parent_stop() {
 #[test]
 fn sibling_creation_vs_collection() {
     loom::model(|| {
-        let root = Inner::new_root();
+        let root = Inner::new_root(false);
         let doomed = Inner::new_child(&root);
         drop(Guard::new(&doomed));
         let collector = thread::spawn(move || drop(doomed));

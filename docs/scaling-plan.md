@@ -164,4 +164,10 @@ This is h2's per-stream guard on the root.
   0.9–1.05 shared/private. With 1,000 live siblings, child+guard went from 12.4 µs to 0.6 µs
   on one thread. Without siblings it's about 17% slower than 0.3.6 (about 600 vs 510 ns),
   because of the S3-safe counting; with an interrupt as well, it's about 2× faster.
-
+- **Guard provenance: opt-in.** On h2c at 32 cores, `GuardInfo`'s `Instant::now()` was 3.9% of
+  cycles, and its allocation fed `mi_free` (4.6%). A guard now keeps only its
+  `&'static Location`, used by the drop-during-shutdown log. The registry and per-guard age
+  (an allocation, a clock read and a lock) exist only under `Swansong::with_guard_report()`,
+  which is fixed at root creation and inherited by children. Otherwise `guard_report()` only
+  counts. Guard create+drop on one thread went from about 149 ns with one allocation to about
+  33 ns with none, and child+guard is now about 12% faster than 0.3.6.

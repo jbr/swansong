@@ -45,13 +45,15 @@ guards must be dropped for shutdown to be considered complete. Guards can be cre
 
 ## Debugging stragglers
 
-Each [`Guard`] records the source location it was created at, captured with `#[track_caller]`. If
-a shutdown stalls because of straggling guards, [`Swansong::guard_report`] returns a
-[`GuardReport`] describing the outstanding guards, aggregated by creation site and including the
-age of the oldest guard at each site.
+Each [`Guard`] knows the source location it was created at, captured with `#[track_caller]`.
+Guards dropped after shutdown has been initiated log that site at [`log::Level::Debug`], so
+enabling debug logging shows each straggler as it resolves.
 
-Guards dropped after shutdown has been initiated also log their creation site at
-[`log::Level::Debug`], so enabling debug logging shows each straggler as it resolves.
+For more, create the root with [`Swansong::with_guard_report`]. Then, if a shutdown stalls
+because of straggling guards, [`Swansong::guard_report`] returns a [`GuardReport`] describing
+the outstanding guards, aggregated by creation site and including the age of the oldest guard at
+each site, and the drop log includes each straggler's age. Without it, guards record nothing, and
+the report only counts them.
 
 ## Async Example
 ```rust
@@ -178,7 +180,30 @@ impl Swansong {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner: Inner::new_root(),
+            inner: Inner::new_root(false),
+        }
+    }
+
+    /// Construct a new `Swansong` whose [`Guard`]s record where and when they were created, for
+    /// [`Swansong::guard_report`]. Its children do the same.
+    ///
+    /// This is a debugging aid for shutdowns that stall on straggling guards, so it is chosen
+    /// when the root is created: a report switched on later would miss the guards that already
+    /// exist. Recording costs an allocation, a clock read and a lock on every guard; without it,
+    /// creating and dropping a guard costs none of these.
+    ///
+    /// ```rust
+    /// # use swansong::Swansong;
+    /// let swansong = Swansong::with_guard_report();
+    /// let _guard = swansong.guard();
+    /// let report = swansong.guard_report();
+    /// assert_eq!(report.entries().len(), 1);
+    /// println!("{report}");
+    /// ```
+    #[must_use]
+    pub fn with_guard_report() -> Self {
+        Self {
+            inner: Inner::new_root(true),
         }
     }
 
@@ -278,15 +303,17 @@ impl Swansong {
     /// Report the provenance of the outstanding [`Guard`]s in this Swansong's
     /// subtree.
     ///
-    /// Every guard records the source location it was created at (captured
-    /// with `#[track_caller]`, so it points at the `swansong.guard()`,
+    /// Under a root created with [`Swansong::with_guard_report`], every guard
+    /// records the source location it was created at (captured with
+    /// `#[track_caller]`, so it points at the `swansong.guard()`,
     /// `swansong.guarded(..)`, or `interrupt.guarded()` call in your code;
-    /// clones inherit the location of the guard they were cloned from). This
-    /// method aggregates the currently-live guards by creation site. It is
-    /// useful for debugging a shutdown that is stalled on straggling guards —
-    /// for example, by logging the report (via its [`Display`][std::fmt::Display]
-    /// implementation) when [`Swansong::shut_down`] has not completed within a
-    /// deadline.
+    /// clones inherit the location of the guard they were cloned from) and
+    /// when. This method aggregates the currently-live guards by creation site.
+    /// It is useful for debugging a shutdown that is stalled on straggling
+    /// guards — for example, by logging the report (via its
+    /// [`Display`][std::fmt::Display] implementation) when
+    /// [`Swansong::shut_down`] has not completed within a deadline. Otherwise
+    /// the report only has the [`guard_count`][GuardReport::guard_count].
     ///
     /// Like [`Swansong::guard_count`], this performs an `O(subtree)` walk, and
     /// additionally takes a brief per-node lock; it is intended for
@@ -296,7 +323,7 @@ impl Swansong {
     ///
     /// ```rust
     /// # use swansong::Swansong;
-    /// let swansong = Swansong::new();
+    /// let swansong = Swansong::with_guard_report();
     /// let guard = swansong.guard();
     /// let report = swansong.guard_report();
     /// assert_eq!(report.guard_count(), 1);
@@ -306,6 +333,9 @@ impl Swansong {
     /// ```
     #[must_use]
     pub fn guard_report(&self) -> GuardReport {
+        if !self.inner.keeps_guard_report() {
+            return GuardReport::unrecorded(self.guard_count());
+        }
         let mut infos = Vec::new();
         self.inner.guard_infos_subtree(&mut infos);
         GuardReport::from_infos(infos)

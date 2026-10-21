@@ -10,7 +10,10 @@ use std::{
 /// A point-in-time snapshot of the outstanding [`Guard`][crate::Guard]s in a
 /// [`Swansong`][crate::Swansong]'s subtree, aggregated by creation site.
 ///
-/// Returned by [`Swansong::guard_report`][crate::Swansong::guard_report].
+/// Returned by [`Swansong::guard_report`][crate::Swansong::guard_report]. Guards only record
+/// where and when they were created under a root made with
+/// [`Swansong::with_guard_report`][crate::Swansong::with_guard_report]. Otherwise the report
+/// has the count but no entries.
 ///
 /// The [`Display`] implementation is suitable for logging when a shutdown
 /// stalls on straggling guards:
@@ -23,6 +26,8 @@ use std::{
 #[derive(Debug, Clone)]
 pub struct GuardReport {
     entries: Vec<GuardReportEntry>,
+    /// Guards counted without provenance, when the tree keeps no guard report.
+    unrecorded: usize,
 }
 
 /// The outstanding [`Guard`][crate::Guard]s that share a single creation site.
@@ -54,23 +59,38 @@ impl GuardReport {
                 .cmp(&a.oldest_age)
                 .then_with(|| a.location.cmp(b.location))
         });
-        Self { entries }
+        Self {
+            entries,
+            unrecorded: 0,
+        }
+    }
+
+    pub(crate) fn unrecorded(guard_count: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            unrecorded: guard_count,
+        }
     }
 
     /// The total number of outstanding guards in this report.
     #[must_use]
     pub fn guard_count(&self) -> usize {
-        self.entries.iter().map(GuardReportEntry::count).sum()
+        self.entries
+            .iter()
+            .map(GuardReportEntry::count)
+            .sum::<usize>()
+            + self.unrecorded
     }
 
     /// Whether there were no outstanding guards when this report was taken.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.guard_count() == 0
     }
 
     /// The entries in this report, one per distinct creation site with at
-    /// least one outstanding guard, sorted oldest-first.
+    /// least one outstanding guard, sorted oldest-first. Empty unless the root was created
+    /// with [`Swansong::with_guard_report`][crate::Swansong::with_guard_report].
     #[must_use]
     pub fn entries(&self) -> &[GuardReportEntry] {
         &self.entries
@@ -130,6 +150,13 @@ impl Display for GuardReport {
             return f.write_str("no outstanding guards");
         }
         let plural = if count == 1 { "" } else { "s" };
+        if self.unrecorded > 0 {
+            return write!(
+                f,
+                "{count} outstanding guard{plural} (create the root with \
+                 Swansong::with_guard_report() to record where and when guards are created)"
+            );
+        }
         write!(f, "{count} outstanding guard{plural}:")?;
         for entry in &self.entries {
             write!(f, "\n{entry}")?;

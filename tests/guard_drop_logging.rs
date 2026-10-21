@@ -65,4 +65,20 @@ fn guard_drop_logs_at_debug_only_after_shutdown_initiated() {
         "{}",
         captured[0]
     );
+    // Without a guard report, guards read no clock, so the log has no age.
+    assert!(!captured[0].contains(" after "), "{}", captured[0]);
+
+    // With one, it does.
+    let reporting = Swansong::with_guard_report();
+    let straggler = reporting.guard();
+    reporting.shut_down();
+    drop(straggler);
+    let captured = take_captured();
+    assert_eq!(captured.len(), 1, "{captured:?}");
+    #[cfg(not(miri))]
+    assert!(
+        captured[0].contains("dropped during shutdown after "),
+        "{}",
+        captured[0]
+    );
 }
