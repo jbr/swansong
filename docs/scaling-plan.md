@@ -137,3 +137,24 @@ This is h2's per-stream guard on the root.
   (`Send`/`Sync`/`Unpin`) identical, and assert that statically.
 - **Downstream A/B:** trillium pulls swansong from crates.io. To compare, `trillium-bench`
   patches `swansong = { path = "../swansong" }`.
+
+## Status
+
+- **Phase 1 (interrupts): done.** On the 4C/8T laptop at 8 threads, shared-root interrupt
+  pending→ready went from about 1.2 to 57–78 Mops/s, and shared/private from 0.08 to 0.86–0.99.
+  An already-ready interrupt no longer allocates. In trillium's arena entry on a 96-core
+  Zen 5 box, h1 at 32 cores went from 0.63M to 2.11M req/s, and from 47.9 to 11.8 µs CPU per
+  request.
+- **Phase 2 (guards): done, with two changes to the design above.**
+  - The existing transition reasoning does not carry over: it violates S3 across levels
+    (`invariants.md` §6). Each level now arrives at the one above before its first count
+    becomes visible, and a losing concurrent arrival is taken back.
+  - Shards stay arrived while their node runs and are flushed at stop or collection. Without
+    this, a thread holding one guard at a time would hit the node's count on every guard. The
+    stop bit shares a word with each count, so a racing stop and departure can't both miss.
+  - Guard create+drop at 8 threads on a shared root: about 1.5 → 17–32 Mops/s, and
+    shared/private 0.08 → ~1.0. A child's guards still pin the child; a root's guards hold
+    only their shard.
+- **Phase 3:** not started. `add_child` should also drop evicted `Arc`s after releasing the
+  lock, since a child's last `Arc` dropping wakes its interrupts.
+

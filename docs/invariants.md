@@ -163,6 +163,14 @@ That is false sharing on every check.
 **`child()`:** an O(live children) `retain` under the parent's `children` mutex on every
 creation.
 
+**S3 is violated across levels.** `increment_guard` increments the local count and only then
+propagates an empty→nonempty transition to the ancestors, and a Guard that finds the count
+already nonzero returns at once. So when two threads create the first Guards on an empty
+child, the second can return before the first has made the child count at the root. If the
+second thread then calls `root.shut_down()`, the returned completion can resolve while that
+Guard, created before the call, is alive. A loom model of the protocol finds it, and a stress
+test against the published crate hit it about once per 100k rounds.
+
 ### Measured
 
 4-core laptop, single die; numbers are total ops/s across all threads.
