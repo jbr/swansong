@@ -56,15 +56,20 @@ enum Op {
     /// `child()` with a guard and a pending interrupt on it, then all dropped. The
     /// per-connection h2/h3 pattern.
     Child,
+    /// `Child` while the parent has [`SIBLINGS`] other live children, as a busy server does.
+    ChildAmongSiblings,
 }
 
-const OPS: [(&str, Op); 5] = [
+const OPS: [(&str, Op); 6] = [
     ("interrupt-pending", Op::InterruptPending),
     ("interrupt-ready", Op::InterruptReady),
     ("guard", Op::Guard),
     ("state", Op::State),
     ("child", Op::Child),
+    ("child-among-siblings", Op::ChildAmongSiblings),
 ];
+
+const SIBLINGS: usize = 1000;
 
 fn run_once(op: Op, swansong: &Swansong, cx: &mut Context<'_>) {
     match op {
@@ -83,7 +88,7 @@ fn run_once(op: Op, swansong: &Swansong, cx: &mut Context<'_>) {
         Op::State => {
             black_box(swansong.state());
         }
-        Op::Child => {
+        Op::Child | Op::ChildAmongSiblings => {
             let child = swansong.child();
             let guard = child.guard();
             let mut interrupt = pin!(child.interrupt(PendingOnce(false)));
@@ -98,6 +103,13 @@ fn run_once(op: Op, swansong: &Swansong, cx: &mut Context<'_>) {
 /// `duration`, all on one `Swansong` if `shared`, otherwise one per thread.
 fn measure(op: Op, threads: usize, shared: bool, duration: Duration) -> f64 {
     let root = Swansong::new();
+    let siblings = |swansong: &Swansong| -> Vec<Swansong> {
+        match op {
+            Op::ChildAmongSiblings => (0..SIBLINGS).map(|_| swansong.child()).collect(),
+            _ => Vec::new(),
+        }
+    };
+    let _root_siblings = if shared { siblings(&root) } else { Vec::new() };
     let start_line = Arc::new(Barrier::new(threads + 1));
     let stop = Arc::new(AtomicBool::new(false));
     let total = Arc::new(AtomicU64::new(0));
@@ -109,8 +121,14 @@ fn measure(op: Op, threads: usize, shared: bool, duration: Duration) -> f64 {
             } else {
                 Swansong::new()
             };
+            let own_siblings = if shared {
+                Vec::new()
+            } else {
+                siblings(&swansong)
+            };
             let (start_line, stop, total) = (start_line.clone(), stop.clone(), total.clone());
             thread::spawn(move || {
+                let _own_siblings = own_siblings;
                 let mut cx = Context::from_waker(Waker::noop());
                 for _ in 0..10_000 {
                     run_once(op, &swansong, &mut cx);

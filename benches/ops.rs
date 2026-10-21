@@ -86,3 +86,15 @@ fn child_with_guard(bencher: Bencher) {
         black_box(child.guard());
     });
 }
+
+/// `child_with_guard` while the parent has 1000 other live children, as a busy server does.
+#[divan::bench(threads = [1, 2, 4, 8])]
+fn child_with_guard_among_siblings(bencher: Bencher) {
+    let swansong = Swansong::new();
+    let siblings: Vec<_> = (0..1000).map(|_| swansong.child()).collect();
+    bencher.bench(|| {
+        let child = swansong.child();
+        black_box(child.guard());
+    });
+    drop(siblings);
+}
