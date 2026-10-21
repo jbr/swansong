@@ -322,3 +322,36 @@ fn collection_vs_root_stop() {
         }
     });
 }
+
+/// `spec.md` §5.6: a child created while its parent stops ends up stopped, whichever is first.
+#[test]
+fn child_creation_vs_parent_stop() {
+    loom::model(|| {
+        let root = Inner::new_root();
+        let creator = thread::spawn({
+            let root = Arc::clone(&root);
+            move || Inner::new_child(&root)
+        });
+        root.stop();
+        let child = creator.join().unwrap();
+        assert!(child.is_stopped());
+    });
+}
+
+/// A child is collected while a sibling is created, whose insertion may sweep the collected
+/// child's entry. Stop still reaches the sibling, and the collected child departs the root.
+#[test]
+fn sibling_creation_vs_collection() {
+    loom::model(|| {
+        let root = Inner::new_root();
+        let doomed = Inner::new_child(&root);
+        drop(Guard::new(&doomed));
+        let collector = thread::spawn(move || drop(doomed));
+        let sibling = Inner::new_child(&root);
+        collector.join().unwrap();
+
+        root.stop();
+        assert!(sibling.is_stopped());
+        assert!(root.is_complete());
+    });
+}

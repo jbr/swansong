@@ -323,9 +323,8 @@ impl Swansong {
     ///
     /// # Performance
     ///
-    /// Creating a child has O(n) cost where n is the number of live children, due to
-    /// cleanup of stale internal references. This is suitable for most use cases but may
-    /// not be ideal for very high-frequency child creation with many concurrent children.
+    /// Creating a child is O(1), and contends only with other children created on the same
+    /// thread, so it suits creating a child per connection or per request.
     ///
     /// # Example: HTTP/3 server
     ///
