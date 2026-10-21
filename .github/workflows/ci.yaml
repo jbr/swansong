@@ -85,6 +85,19 @@ jobs:
           MIRIFLAGS: "-Zmiri-env-forward=RUST_BACKTRACE -Zmiri-ignore-leaks"
         run: cargo +nightly miri test --tests
 
+  loom:
+    name: Loom
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2.9.2
+      - name: Loom models
+        run: cargo test --lib --release
+        env:
+          RUSTFLAGS: "-Dwarnings --cfg swansong_loom"
+
   thread_sanitizer:
     name: Thread Sanitizer
     runs-on: ubuntu-latest
