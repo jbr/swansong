@@ -1,32 +1,58 @@
-//! Per-thread shards of a node's stop signal.
+//! Per-thread shards of a node: its stop signal as interrupts see it, and its guard count.
 //!
-//! Interrupts on a node register for stop wakeups on the shard belonging to the thread that
-//! created them, not on one node-wide list, so in steady state an interrupt only writes memory
-//! that its own thread owns. Stopping a node latches and drains every shard. See
-//! `docs/invariants.md` §3 for the contract this implements.
+//! Interrupts and guards on a node use the shard belonging to the thread that created them, not
+//! node-wide state, so in steady state they only write memory that their own thread owns. See
+//! `docs/invariants.md` for the contract this implements.
+//!
+//! # Stop
 //!
 //! Ordering between registration and stop comes from each shard's lock rather than from
-//! `SeqCst`: [`Shard::stop`] sets `stopped` before it takes the lock to drain, and registration
-//! re-checks `stopped` under that lock. A registration therefore either lands before the drain
-//! and is woken by it, or observes the stop. Every other read of `stopped` may be `Relaxed`,
-//! because the poll that follows a wake is ordered after the wake, and so after the store.
+//! `SeqCst`: [`Shard::stop`] sets [`STOPPED`] before it takes the lock to drain, and
+//! registration re-checks it under that lock. A registration therefore either lands before the
+//! drain and is woken by it, or observes the stop. Interrupts' other reads of the bit may be
+//! `Relaxed`, because the poll that follows a wake is ordered after the wake, and so after the
+//! store.
+//!
+//! # Guards
+//!
+//! Counts form a tree. A shard counts the guards homed on it and the child nodes that arrived
+//! at it; a node counts its arrived shards; a nonempty child node arrives at a shard of its
+//! parent. Each level arrives at the one above before its first count becomes visible, and
+//! departs only after its last count is gone, so while a guard exists every ancestor of its
+//! home sees a nonempty subset (`docs/invariants.md` S3). A guard that finds its shard already
+//! arrived relies on an arrival that has already completed.
+//!
+//! While its node runs, a shard stays arrived when it empties, so steady-state guard traffic
+//! touches only the shard. Stopping or collecting the node flushes its empty shards, and from
+//! then on a shard departs as soon as it empties. The stop bit lives in the same word as the
+//! counts, so a departure and a stop are read-modify-writes of one location and can't both miss
+//! that the shard is empty and stopped; the same holds for a node's count and its stop bit.
 
-use super::Inner;
+use super::{
+    guard::{GuardInfo, GuardRegistry},
+    sync::{AtomicU64, Mutex},
+    Inner,
+};
 use std::{
     cell::Cell,
     fmt::{self, Debug, Formatter},
     mem,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Weak,
-    },
+    sync::{atomic::Ordering, Arc, Weak},
     task::{Context, Poll, Waker},
 };
 
-#[cfg(swansong_loom)]
-use loom::sync::{atomic::AtomicBool, Mutex};
-#[cfg(not(swansong_loom))]
-use std::sync::{atomic::AtomicBool, Mutex};
+/// A shard's `state` counts the guards homed on it in its low 32 bits,
+pub(crate) const LOCAL_ONE: u64 = 1;
+const LOCAL_MASK: u64 = 0xFFFF_FFFF;
+/// the child nodes that arrived at it in the next 30,
+pub(crate) const KIDS_ONE: u64 = 1 << 32;
+/// whether its node has stopped or been collected,
+pub(crate) const STOPPED: u64 = 1 << 62;
+/// and whether it has itself arrived at its node. A shard that hasn't arrived is empty.
+///
+/// [`Inner`]'s state uses the same two bits: whether the node has stopped, and for a child,
+/// whether it has arrived at a parent shard.
+pub(crate) const ARRIVED: u64 = 1 << 63;
 
 /// The most shards a root gets, however many threads the machine has.
 #[cfg(not(swansong_loom))]
@@ -54,10 +80,23 @@ pub(crate) fn root_shard_count() -> usize {
 /// shard count, so threads spread evenly over every node's shards with no per-node state, and a
 /// thread exiting needs no cleanup.
 pub(crate) fn thread_index() -> usize {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(not(swansong_loom))]
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    #[cfg(not(swansong_loom))]
     thread_local! {
         static INDEX: Cell<usize> = const { Cell::new(usize::MAX) };
     }
+
+    // Reset for each loom execution, so that indices are a function of the schedule.
+    #[cfg(swansong_loom)]
+    loom::lazy_static! {
+        static ref NEXT: loom::sync::atomic::AtomicUsize = loom::sync::atomic::AtomicUsize::new(0);
+    }
+    #[cfg(swansong_loom)]
+    loom::thread_local! {
+        static INDEX: Cell<usize> = Cell::new(usize::MAX);
+    }
+
     INDEX.with(|index| {
         if index.get() == usize::MAX {
             index.set(NEXT.fetch_add(1, Ordering::Relaxed));
@@ -66,49 +105,182 @@ pub(crate) fn thread_index() -> usize {
     })
 }
 
-/// One thread's share of a node's stop signal.
+/// One thread's share of a node.
 ///
-/// `stopped` is written once, by [`Shard::stop`]. Until then the shard's memory is touched only
-/// by the interrupts registered on it, which in steady state all belong to one thread. The
-/// alignment keeps shards that belong to different threads off each other's cache lines.
+/// The shard's memory is touched only by the interrupts and guards that use it, which in steady
+/// state all belong to one thread, and by stop. The alignment keeps shards that belong to
+/// different threads off each other's cache lines.
 #[repr(align(128))]
 pub(crate) struct Shard {
-    stopped: AtomicBool,
+    /// See [`LOCAL_ONE`], [`KIDS_ONE`], [`STOPPED`] and [`ARRIVED`].
+    state: AtomicU64,
     waiters: Mutex<Waiters>,
+    registry: Mutex<GuardRegistry>,
     node: Weak<Inner>,
+    root: bool,
 }
 
 impl Debug for Shard {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("Shard")
             .field("stopped", &self.is_stopped())
+            .field("guards", &self.guard_count())
             .finish_non_exhaustive()
     }
 }
 
 impl Shard {
-    pub(crate) fn new(node: Weak<Inner>) -> Self {
+    pub(crate) fn new(node: Weak<Inner>, root: bool) -> Self {
         Self {
-            stopped: AtomicBool::new(false),
+            state: AtomicU64::new(0),
             waiters: Mutex::new(Waiters::default()),
+            registry: Mutex::new(GuardRegistry::default()),
             node,
+            root,
         }
     }
 
-    fn is_stopped(&self) -> bool {
-        self.stopped.load(Ordering::Relaxed)
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.state.load(Ordering::Relaxed) & STOPPED != 0
     }
 
-    /// Latch this shard and wake every interrupt registered on it.
+    /// Latch this shard, wake every interrupt registered on it, and flush it if it's empty.
+    /// `node` is this shard's node.
     ///
-    /// Registration re-checks `stopped` under the lock taken here, so once the drain has run the
-    /// shard accepts no further registrations and its slots are never reused.
-    pub(crate) fn stop(&self) {
-        self.stopped.store(true, Ordering::Relaxed);
+    /// Registration re-checks the stop bit under the lock taken here, so once the drain has run
+    /// the shard accepts no further registrations and its slots are never reused.
+    pub(crate) fn stop(&self, node: &Inner) {
+        let previous = self.state.fetch_or(STOPPED, Ordering::SeqCst);
         let waiters = mem::take(&mut *self.waiters.lock().unwrap());
         for waker in waiters.into_wakers() {
             waker.wake();
         }
+        // Empty when stopped. Otherwise the departure that empties it will see the stop.
+        if previous & !STOPPED == ARRIVED {
+            self.flush(node);
+        }
+    }
+
+    /// Count one more `unit` here, first arriving at `node`, this shard's node, if this shard
+    /// hasn't arrived.
+    pub(crate) fn arrive(&self, unit: u64, node: &Inner) {
+        let mut state = self.state.load(Ordering::SeqCst);
+        loop {
+            if state & ARRIVED == 0 {
+                debug_assert_eq!(state & !STOPPED, 0, "an unarrived shard is empty");
+                node.arrive();
+                match self.state.compare_exchange(
+                    state,
+                    state | ARRIVED | unit,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => return,
+                    Err(actual) => {
+                        // Another arrival won; take ours back.
+                        node.depart();
+                        state = actual;
+                    }
+                }
+            } else {
+                match self.state.compare_exchange_weak(
+                    state,
+                    state + unit,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => return,
+                    Err(actual) => state = actual,
+                }
+            }
+        }
+    }
+
+    /// Count one more `unit` on a root shard that has already arrived, which needs no access to
+    /// the node. Returns false, counting nothing, if the shard hasn't arrived.
+    pub(crate) fn arrive_if_arrived(&self, unit: u64) -> bool {
+        let mut state = self.state.load(Ordering::SeqCst);
+        while state & ARRIVED != 0 {
+            match self.state.compare_exchange_weak(
+                state,
+                state + unit,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => state = actual,
+            }
+        }
+        false
+    }
+
+    /// Count one more `unit` on a shard that a live guard keeps nonempty, such as when cloning it.
+    pub(crate) fn arrive_nonempty(&self, unit: u64) {
+        let previous = self.state.fetch_add(unit, Ordering::SeqCst);
+        debug_assert!(previous & ARRIVED != 0 && previous & !(ARRIVED | STOPPED) != 0);
+    }
+
+    /// Count one fewer `unit`. Returns whether that emptied the shard after its node stopped, in
+    /// which case the caller must [`flush`][Self::flush] it.
+    #[must_use]
+    pub(crate) fn depart(&self, unit: u64) -> bool {
+        self.state.fetch_sub(unit, Ordering::SeqCst) - unit == ARRIVED | STOPPED
+    }
+
+    /// If this stopped shard is arrived but empty, depart from `node`, this shard's node.
+    pub(crate) fn flush(&self, node: &Inner) {
+        if self
+            .state
+            .compare_exchange(
+                ARRIVED | STOPPED,
+                STOPPED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            node.depart();
+        }
+    }
+
+    /// Record a new guard's provenance.
+    pub(crate) fn register(&self, info: &Arc<GuardInfo>) {
+        self.registry.lock().unwrap().register(Arc::downgrade(info));
+    }
+
+    pub(crate) fn guard_count(&self) -> usize {
+        usize::try_from(self.state.load(Ordering::Relaxed) & LOCAL_MASK)
+            .expect("local guard count fits in usize")
+    }
+
+    pub(crate) fn guard_infos(&self, out: &mut Vec<Arc<GuardInfo>>) {
+        let mut registry = self.registry.lock().unwrap();
+        registry.sweep();
+        out.extend(registry.live());
+    }
+
+    pub(crate) fn is_root(&self) -> bool {
+        self.root
+    }
+
+    /// The node, unless it has been collected.
+    pub(crate) fn node(&self) -> Option<Arc<Inner>> {
+        self.node.upgrade()
+    }
+
+    /// Whether both shards belong to the same node.
+    pub(crate) fn same_node(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.node, &other.node)
+    }
+
+    #[cfg(all(test, swansong_loom))]
+    pub(crate) fn state(&self) -> u64 {
+        self.state.load(Ordering::SeqCst)
+    }
+
+    #[cfg(all(test, swansong_loom))]
+    pub(crate) fn waiter_count(&self) -> usize {
+        self.waiters.lock().unwrap().len()
     }
 }
 
@@ -176,14 +348,13 @@ impl StopListener {
         Poll::Pending
     }
 
-    /// The node, unless it has been collected.
-    pub(crate) fn node(&self) -> Option<Arc<Inner>> {
-        self.shard.node.upgrade()
+    pub(crate) fn shard(&self) -> &Arc<Shard> {
+        &self.shard
     }
 
     /// Whether both listeners belong to the same node, whichever shards they use.
     pub(crate) fn same_node(&self, other: &Self) -> bool {
-        Weak::ptr_eq(&self.shard.node, &other.shard.node)
+        self.shard.same_node(&other.shard)
     }
 }
 
@@ -299,169 +470,5 @@ mod tests {
             assert_eq!(waiters.len(), 0);
         }
         assert_eq!(waiters.slots.len(), 3);
-    }
-}
-
-#[cfg(all(test, swansong_loom))]
-mod loom_models {
-    //! Models of the register/stop protocol (`docs/invariants.md` §3 and §7). Run with
-    //! `RUSTFLAGS="--cfg swansong_loom" cargo test --lib --release loom`.
-
-    use crate::{implementation::Inner, Interrupt};
-    use loom::{
-        sync::atomic::{AtomicUsize, Ordering},
-        thread,
-    };
-    use std::{
-        future::{pending, Future, Pending},
-        pin::Pin,
-        sync::Arc,
-        task::{Context, Poll, Wake, Waker},
-    };
-
-    #[derive(Default)]
-    struct Wakes(AtomicUsize);
-
-    impl Wake for Wakes {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    impl Wakes {
-        fn waker() -> (Arc<Self>, Waker) {
-            let wakes = Arc::new(Self::default());
-            (Arc::clone(&wakes), Waker::from(wakes))
-        }
-
-        fn count(&self) -> usize {
-            self.0.load(Ordering::SeqCst)
-        }
-    }
-
-    fn poll(interrupt: &mut Interrupt<Pending<()>>, waker: &Waker) -> Poll<Option<()>> {
-        Pin::new(interrupt).poll(&mut Context::from_waker(waker))
-    }
-
-    /// L1, L2: a poll racing stop either observes it or registers in time to be woken by it.
-    #[test]
-    fn register_vs_stop() {
-        loom::model(|| {
-            let root = Inner::new_root();
-            let mut interrupt = Interrupt::new(&root, pending());
-            let (wakes, waker) = Wakes::waker();
-
-            let stopper = thread::spawn({
-                let root = Arc::clone(&root);
-                move || root.stop()
-            });
-            let polled = poll(&mut interrupt, &waker);
-            stopper.join().unwrap();
-
-            if polled.is_pending() {
-                assert!(wakes.count() > 0, "pending interrupt not woken by stop");
-            }
-            assert_eq!(poll(&mut interrupt, &waker), Poll::Ready(None));
-        });
-    }
-
-    /// A re-poll from the same task skips the lock; the registration it relies on must still
-    /// be woken by a racing stop.
-    #[test]
-    fn same_waker_repoll_vs_stop() {
-        loom::model(|| {
-            let root = Inner::new_root();
-            let mut interrupt = Interrupt::new(&root, pending());
-            let (wakes, waker) = Wakes::waker();
-            assert!(poll(&mut interrupt, &waker).is_pending());
-
-            let stopper = thread::spawn({
-                let root = Arc::clone(&root);
-                move || root.stop()
-            });
-            let polled = poll(&mut interrupt, &waker);
-            stopper.join().unwrap();
-
-            if polled.is_pending() {
-                assert!(wakes.count() > 0, "pending interrupt not woken by stop");
-            }
-            assert_eq!(poll(&mut interrupt, &waker), Poll::Ready(None));
-        });
-    }
-
-    /// L4: a registered interrupt migrates to another thread and is polled with a new waker
-    /// while stop drains its shard. If that poll returns Pending, the new waker must be woken.
-    #[test]
-    fn migration_and_waker_replacement_vs_stop() {
-        loom::model(|| {
-            let root = Inner::new_root();
-            let mut interrupt = Interrupt::new(&root, pending());
-            let (_, first_waker) = Wakes::waker();
-            assert!(poll(&mut interrupt, &first_waker).is_pending());
-
-            let stopper = thread::spawn({
-                let root = Arc::clone(&root);
-                move || root.stop()
-            });
-            let migrated = thread::spawn(move || {
-                let (wakes, waker) = Wakes::waker();
-                let polled = poll(&mut interrupt, &waker);
-                (interrupt, wakes, waker, polled)
-            });
-            stopper.join().unwrap();
-            let (mut interrupt, wakes, waker, polled) = migrated.join().unwrap();
-
-            if polled.is_pending() {
-                assert!(wakes.count() > 0, "replacement waker not woken by stop");
-            }
-            assert_eq!(poll(&mut interrupt, &waker), Poll::Ready(None));
-        });
-    }
-
-    /// Dropping one registration while stop drains must not disturb another's: the survivor is
-    /// woken, and no registration outlives the drain.
-    #[test]
-    fn deregistration_vs_stop() {
-        loom::model(|| {
-            let root = Inner::new_root();
-            let mut dropped = Interrupt::new(&root, pending());
-            let mut survivor = Interrupt::new(&root, pending());
-            let (_, dropped_waker) = Wakes::waker();
-            let (wakes, survivor_waker) = Wakes::waker();
-            assert!(poll(&mut dropped, &dropped_waker).is_pending());
-            assert!(poll(&mut survivor, &survivor_waker).is_pending());
-
-            let dropper = thread::spawn(move || drop(dropped));
-            root.stop();
-            dropper.join().unwrap();
-
-            assert!(wakes.count() > 0, "surviving interrupt not woken by stop");
-            for shard in root.shards() {
-                assert_eq!(shard.waiters.lock().unwrap().len(), 0);
-            }
-            assert_eq!(poll(&mut survivor, &survivor_waker), Poll::Ready(None));
-        });
-    }
-
-    /// `spec.md` §5.8: when a child is collected, an interrupt pending on it goes terminal and
-    /// is woken to observe that.
-    #[test]
-    fn collection_vs_pending_interrupt() {
-        loom::model(|| {
-            let root = Inner::new_root();
-            let child = Inner::new_child(&root);
-            let mut interrupt = Interrupt::new(&child, pending());
-            let (wakes, waker) = Wakes::waker();
-
-            let collector = thread::spawn(move || drop(child));
-            let polled = poll(&mut interrupt, &waker);
-            collector.join().unwrap();
-
-            if polled.is_pending() {
-                assert!(wakes.count() > 0, "interrupt on collected child not woken");
-            }
-            assert_eq!(poll(&mut interrupt, &waker), Poll::Ready(None));
-            assert!(root.shards().iter().all(|shard| !shard.is_stopped()));
-        });
     }
 }

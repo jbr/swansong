@@ -9,6 +9,11 @@ pub(crate) use inner::Inner;
 
 mod shard;
 
+mod sync;
+
+#[cfg(all(test, swansong_loom))]
+mod loom_models;
+
 mod guard;
 pub use guard::Guard;
 
