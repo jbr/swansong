@@ -8,7 +8,6 @@ use std::{
     sync::{mpsc, Arc, Barrier},
     task::{Context, Waker},
     thread,
-    time::Duration,
 };
 use swansong::{Guard, Swansong};
 
@@ -172,7 +171,7 @@ fn stress_guards_racing_shutdown() {
         finished.recv().unwrap();
         #[cfg(not(miri))]
         finished
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(std::time::Duration::from_secs(5))
             .expect("shutdown never completed");
     }
 }
