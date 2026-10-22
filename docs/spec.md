@@ -455,9 +455,9 @@ shard, `Interrupt::guarded` counts the Guard without touching the node.
 rechecks, sleeps.
 
 **`Swansong::shut_down()`** sets the stop bit, latches, drains and
-flushes the shards, notifies `stop_event`, acquires the `children` mutex,
-walks the live children via `Weak::upgrade`, and recursively calls
-`stop()` on each.
+flushes the shards, notifies `stop_event`, snapshots live children via
+`Weak::upgrade` under each shard's registry lock, and recursively calls
+`stop()` on each after releasing the locks.
 
 **`Swansong::child()`** allocates a new `Inner` holding `self` as its
 parent, then registers a `Weak` to it on the calling thread's shard of
@@ -478,13 +478,26 @@ beyond the decrement.
   shard arrives at its node, and a child at its parent, only when first
   used, and again after a stop.
 - Child Guard create/drop: also the child's `Inner` refcount.
-- Interrupt poll: 1 `Relaxed` load of the shard's flag; the first Pending
-  poll and the drop each also take the shard's (uncontended) lock.
-- `guard_count()`: O(shards + subtree size) walk summing shard counts.
-- `shut_down()`: O(subtree size) propagation.
-- `child()`: O(1): two allocations (the `Inner` and its shard) and the
-  calling thread's shard lock on the parent, plus the parent's refcount.
-  Dropping a child takes the same shard lock to deregister.
+- Interrupt poll: 1 `Relaxed` load of the shard's flag on the fast path.
+  Registering on the first Pending poll, replacing a changed waker, and
+  removing a registration on drop take the shard's shared lock.
+- `guard_count()`: walks live descendants and their shards, summing guard
+  counts and scanning each child registry under its shard's lock. Scans
+  include vacant slots retained from historical peak child occupancy.
+- `guard_report()`: the same child traversal; with provenance enabled,
+  also sweeps each shard's guard registry and collects live records under
+  the shard's lock.
+- `shut_down()`: propagates through live descendants and their shards,
+  scans retained child and waiter slots, and wakes registered waiters.
+  Work therefore depends on historical peak registry occupancy as well
+  as the live subtree and the cost of invoking wakers.
+- `child()`: allocates the child and registers it in amortized O(1) time
+  without scanning existing children. Registration takes a parent shard's
+  lock and increments the parent's shared refcount. Roots shard these
+  locks, but different threads can select the same shard; child nodes
+  have only one shard. The lock is shared with interrupt registration and
+  diagnostics. Dropping a child takes its registration shard's lock to
+  deregister. Creating a child of a stopped parent also stops the new child.
 
 **Arc/Weak summary.**
 - Swansong → Arc<Inner>

@@ -285,7 +285,8 @@ impl Inner {
             .collect()
     }
 
-    /// O(shards + subtree) walk summing real guards across self and all live descendants.
+    /// Sum real guards across self and all live descendants, visiting their shards and
+    /// scanning child registries up to each registry's historical peak occupancy.
     pub(crate) fn guard_count_subtree(&self) -> usize {
         let local: usize = self.shards.iter().map(|shard| shard.guard_count()).sum();
         let children_sum: usize = self
@@ -296,8 +297,8 @@ impl Inner {
         local + children_sum
     }
 
-    /// O(shards + subtree) walk collecting provenance records for all live guards in
-    /// self and all live descendants.
+    /// Collect provenance records across self and all live descendants, visiting their
+    /// shards, scanning retained child slots, and sweeping guard registries under their locks.
     pub(crate) fn guard_infos_subtree(&self, out: &mut Vec<Arc<GuardInfo>>) {
         for shard in self.shards.iter() {
             shard.guard_infos(out);
