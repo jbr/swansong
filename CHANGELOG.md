@@ -6,6 +6,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7](https://github.com/jbr/swansong/compare/v0.3.6...v0.3.7) - 2026-10-22
+
+### Added
+
+- make guard provenance opt-in with Swansong::with_guard_report
+
+### Other
+
+- *(deps)* update rust crate tokio to v1.54.1
+- fix miri
+- update docs for accuracy
+- record phase 3 status
+- make child() O(1) and contention-free
+- *(bench)* add child-among-siblings variants
+- record the 0.3.6 S3 violation and scaling status
+- count guards on per-thread shards
+- run loom models
+- shard interrupt stop registration per thread
+- *(bench)* add thread-scaling and per-op benches
+- add invariants contract and many-core scaling plan
+- *(deps)* update rust-futures monorepo to v0.3.34
+
 ## [0.3.6](https://github.com/jbr/swansong/compare/v0.3.5...v0.3.6) - 2026-08-07
 
 ### Added
