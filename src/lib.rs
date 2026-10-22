@@ -294,7 +294,10 @@ impl Swansong {
     /// Child Swansong handles themselves are not counted as Guards; only real
     /// `Guard` instances are.
     ///
-    /// This performs an `O(subtree)` walk; prefer not to call it in a hot path.
+    /// This walks the live subtree, reading each node's shards and locking each shard's
+    /// child registry. Child registries retain reusable slots, so traversal time also depends
+    /// on their historical peak occupancy, even after children have dropped. Prefer not to
+    /// call this in a hot path.
     #[must_use]
     pub fn guard_count(&self) -> usize {
         self.inner.guard_count_subtree()
@@ -315,9 +318,10 @@ impl Swansong {
     /// [`Swansong::shut_down`] has not completed within a deadline. Otherwise
     /// the report only has the [`guard_count`][GuardReport::guard_count].
     ///
-    /// Like [`Swansong::guard_count`], this performs an `O(subtree)` walk, and
-    /// additionally takes a brief per-node lock; it is intended for
-    /// shutdown-time diagnostics rather than hot paths.
+    /// Like [`Swansong::guard_count`], this walks the live subtree and scans retained
+    /// child-registry slots. When provenance is enabled, it also locks each shard's guard
+    /// registry to sweep dead entries and collect live records. Registry scans take place
+    /// under their locks; this is intended for shutdown-time diagnostics rather than hot paths.
     ///
     /// # Example
     ///
@@ -353,8 +357,12 @@ impl Swansong {
     ///
     /// # Performance
     ///
-    /// Creating a child is O(1), and contends only with other children created on the same
-    /// thread, so it suits creating a child per connection or per request.
+    /// Creating a child registers it in amortized O(1) time, without scanning existing
+    /// children. Registration takes a parent shard's lock and increments the parent's shared
+    /// reference count. Roots spread registrations across shards, but different threads can
+    /// select the same shard; child nodes have only one shard. The lock is also shared with
+    /// interrupt registration and diagnostics, so cross-thread contention is still possible.
+    /// Creating a child after the parent has stopped also stops the new child.
     ///
     /// # Example: HTTP/3 server
     ///

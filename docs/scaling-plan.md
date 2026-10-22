@@ -155,11 +155,16 @@ This is h2's per-stream guard on the root.
   - Guard create+drop at 8 threads on a shared root: about 1.5 → 17–32 Mops/s, and
     shared/private 0.08 → ~1.0. A child's guards still pin the child; a root's guards hold
     only their shard.
-- **Phase 3 (children): done.** Each child is registered on the parent's shard for the
-  creating thread and removes itself when it drops, so `child()` is O(1) under a per-thread
-  lock. The registry never upgrades a child under a lock, so a child's last `Arc` never drops
-  there. A child links only to its parent rather than to every ancestor, and its single shard
-  is stored inline without cache padding, which brings it back to five allocations like
+- **Phase 3 (children): done.** Each child is registered on the parent's shard selected by
+  the creating thread and removes itself when it drops. Registration is amortized O(1)
+  under that shard's shared lock, not a thread-private lock: threads can select the same
+  root shard, and child nodes have only one shard. Child creation also increments the
+  parent's shared refcount. Registry slots are reused but retained at historical peak
+  occupancy, so child snapshots scan vacant slots too. Snapshots upgrade children under
+  the lock but return the resulting `Arc`s for use and drop outside it, so a child's last
+  `Arc` never drops there. A child links only to its parent rather than to every ancestor,
+  and its single shard is stored inline without cache padding, which brings it back to
+  five allocations like
   0.3.6. On the laptop, the `child` op at 8 threads on a shared root went from about 0.21 to
   0.9–1.05 shared/private. With 1,000 live siblings, child+guard went from 12.4 µs to 0.6 µs
   on one thread. Without siblings it's about 17% slower than 0.3.6 (about 600 vs 510 ns),

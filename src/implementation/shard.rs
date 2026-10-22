@@ -467,6 +467,10 @@ impl Drop for StopListener {
 
 /// Values under stable keys, reusing vacated keys: the wakers of a shard's registered
 /// interrupts, and its children.
+///
+/// Insertion is amortized O(1) and removal is O(1). Storage is retained at the historical
+/// peak occupancy; both `values` and `into_values` scan vacant slots as well as occupied ones.
+/// Child snapshots and stop-time waiter drains therefore pay for that historical peak.
 #[derive(Debug)]
 struct Slab<T> {
     slots: Vec<Slot<T>>,
