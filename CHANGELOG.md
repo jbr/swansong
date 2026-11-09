@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8](https://github.com/jbr/swansong/compare/v0.3.7...v0.3.8) - 2026-11-09
+
+### Other
+
+- *(deps)* update rust crate loom to v0.7.3
+
 ## [0.3.7](https://github.com/jbr/swansong/compare/v0.3.6...v0.3.7) - 2026-10-22
 
 ### Added
